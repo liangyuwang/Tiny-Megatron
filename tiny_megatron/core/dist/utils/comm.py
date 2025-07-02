@@ -7,6 +7,8 @@ import torch.distributed as dist
 import math
 
 class ParallelContext:
+    supported_parallel = ["tp", "dp", "pp"]
+
     def __init__(self, parallel_dims: dict[str, int]):
         assert dist.is_initialized(), "torch.distributed must be initialized first"
 
