@@ -43,22 +43,41 @@ class ParallelContext:
 
     def _build_groups(self):
         groups = {}
+        
+        # first, let all processes coordinate to create all required groups
+        # this ensures that all processes call new_group() in the same order
+        all_groups_to_create = set()
+        
+        # collect all groups to create
         for i, name in enumerate(self.dim_names):
-            # compute all possible combinations of this parallel dimension
-            group_ranks = []
-            for j in range(self.dim_sizes[i]):
-                coords = list(self.coords)
-                coords[i] = j
-                rank = self._coords_to_rank(coords)
-                group_ranks.append(rank)
-            
-            # use cache to avoid creating the same group multiple times
-            group_key = tuple(sorted(group_ranks))
+            for coord_val in range(self.dim_sizes[i]):
+                group_ranks = []
+                for rank in range(self.world_size):
+                    rank_coords = self._compute_coords(rank, self.dim_sizes)
+                    if rank_coords[i] == coord_val:
+                        group_ranks.append(rank)
+                group_key = tuple(sorted(group_ranks))
+                all_groups_to_create.add(group_key)
+        
+        # create all groups in a deterministic order (all processes do the same)
+        for group_key in sorted(all_groups_to_create):
             if group_key not in ParallelContext._group_cache:
-                group = dist.new_group(ranks=group_ranks)
+                group = dist.new_group(ranks=list(group_key))
                 ParallelContext._group_cache[group_key] = group
+        
+        # now assign the correct group to the current process
+        for i, name in enumerate(self.dim_names):
+            current_coord_in_dim = self.coords[i]
+            group_ranks = []
             
+            for rank in range(self.world_size):
+                rank_coords = self._compute_coords(rank, self.dim_sizes)
+                if rank_coords[i] == current_coord_in_dim:
+                    group_ranks.append(rank)
+            
+            group_key = tuple(sorted(group_ranks))
             groups[name] = ParallelContext._group_cache[group_key]
+        
         return groups
 
     def get_group(self, name: str):
@@ -72,18 +91,14 @@ class ParallelContext:
 
     def print_debug(self):
         print(f"[Rank {self.rank}] coords: {self.get_coord_dict()}")
-        for name in self.dim_names:
+        for i, name in enumerate(self.dim_names):
             ranks_in_group = []
+            current_coord_in_dim = self.coords[i]  # current rank's coordinate in this dimension
+            
             for rank in range(self.world_size):
-                coords = self._compute_coords(rank, self.dim_sizes)
-                coords_dict = dict(zip(self.dim_names, coords))
-                # check if in the same parallel group
-                same_group = True
-                for other_name in self.dim_names:
-                    if other_name != name and coords_dict[other_name] != self.coords[self.dim_names.index(other_name)]:
-                        same_group = False
-                        break
-                if same_group:
+                rank_coords = self._compute_coords(rank, self.dim_sizes)
+                # if the rank has the same coordinate in the current parallel dimension, it belongs to the same group
+                if rank_coords[i] == current_coord_in_dim:
                     ranks_in_group.append(rank)
             print(f"  {name} group ranks: {ranks_in_group}")
 
