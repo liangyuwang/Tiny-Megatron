@@ -47,6 +47,12 @@ class TPWrapper(nn.Module):
         self.row_linear_names = row_linear_names or []
         self.auto_tune = auto_tune
         
+        # Set target device for TP parameters based on rank
+        if torch.cuda.is_available():
+            self.device = torch.device(f"cuda:{parallel_context.rank}")
+        else:
+            self.device = torch.device("cpu")
+        
         # Validate that no module name appears in both lists
         overlapping = set(self.column_linear_names) & set(self.row_linear_names)
         if overlapping:
@@ -54,6 +60,9 @@ class TPWrapper(nn.Module):
         
         # Apply TP wrapping
         self._wrap_layers()
+        
+        # Move entire model to target device
+        self.model = self.model.to(self.device)
     
     def forward(self, *args, **kwargs):
         """Forward pass through the wrapped model."""
@@ -93,9 +102,8 @@ class TPWrapper(nn.Module):
             auto_tune=self.auto_tune
         )
         
-        # Transfer device and training state
-        device = next(original_module.parameters()).device
-        new_module = new_module.to(device)
+        # Transfer to target device and training state
+        new_module = new_module.to(self.device)
         new_module.train(original_module.training)
         
         # Load state dict (need to handle weight sharding)
@@ -121,9 +129,8 @@ class TPWrapper(nn.Module):
             auto_tune=self.auto_tune
         )
         
-        # Transfer device and training state
-        device = next(original_module.parameters()).device
-        new_module = new_module.to(device)
+        # Transfer to target device and training state
+        new_module = new_module.to(self.device)
         new_module.train(original_module.training)
         
         # Load state dict (need to handle weight sharding)

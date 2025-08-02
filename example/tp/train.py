@@ -20,16 +20,16 @@ dist.init_process_group(backend='nccl', init_method='env://', world_size=world_s
 torch.cuda.set_device(rank)
 
 config = GPTConfig()
-input = torch.randint(0, config.vocab_size, (1, config.block_size))
-target = torch.randint(0, config.vocab_size, (1, config.block_size))
+input = torch.randint(0, config.vocab_size, (1, config.block_size)).cuda()
+target = torch.randint(0, config.vocab_size, (1, config.block_size)).cuda()
 model = GPT2Model(config)   # init model on CPU
 parallel_context = ParallelContext({"tp": world_size})
 model = TPWrapper(
         model, 
         parallel_context=parallel_context,
-        column_linear_names=["q_proj", "k_proj", "v_proj", "gate_proj", "up_proj"],
-        row_linear_names=["o_proj", "down_proj"]
-    )
+        column_linear_names=["c_attn", "c_fc"],
+        row_linear_names=["c_proj"]
+    )  # TPWrapper automatically moves parameters to rank's GPU
 optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5, weight_decay=1e-1)
 
 for i in tqdm(range(100)):

@@ -28,11 +28,21 @@ class DPWrapper(nn.Module):
         """
         super().__init__()
         self.auto_tune = auto_tune
+        self.parallel_context = parallel_context
+        
+        # Set target device for DP parameters based on rank
+        if torch.cuda.is_available():
+            self.device = torch.device(f"cuda:{parallel_context.rank}")
+        else:
+            self.device = torch.device("cpu")
+        
         self._wrap_layers(model)
         self._error_handling(model)
         self.module = model
-        self.parallel_context = parallel_context
         self.require_backward_grad_sync = False
+        
+        # Move entire model to target device
+        self.module = self.module.to(self.device)
     
     def forward(self, *args, **kwargs):
         if self.require_backward_grad_sync:
@@ -53,9 +63,8 @@ class DPWrapper(nn.Module):
                     module_class = _supported_modules[type(child)]
                     child_init_args = get_init_args(child)
                     new_module = module_class(**child_init_args, auto_tune=self.auto_tune)
-                    if hasattr(child, 'parameters') and len(list(child.parameters())) > 0:
-                        child_device = next(child.parameters()).device
-                        new_module = new_module.to(child_device)
+                    # Move new module to target device
+                    new_module = new_module.to(self.device)
                     
                     # Load state dict with strict=False to handle bias differences
                     new_module.load_state_dict(child.state_dict(), strict=False)

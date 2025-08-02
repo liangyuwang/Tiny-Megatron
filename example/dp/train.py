@@ -10,7 +10,7 @@ import torch
 import torch.distributed as dist
 
 from example.model import GPTConfig, GPT2Model
-from tiny_megatron.core import ParallelContext, apply_data_parallel
+from tiny_megatron.core import ParallelContext, DPWrapper
 
 # init distributed
 rank = int(os.getenv('LOCAL_RANK', '0'))
@@ -20,15 +20,15 @@ dist.init_process_group(backend='nccl', init_method='env://', world_size=world_s
 torch.cuda.set_device(rank)
 
 config = GPTConfig()
+model = GPT2Model(config)   # init model on CPU
+parallel_context = ParallelContext({"dp": world_size})
 input = torch.randint(0, config.vocab_size, (1, config.block_size)).cuda()
 target = torch.randint(0, config.vocab_size, (1, config.block_size)).cuda()
-model = GPT2Model(config).cuda()   # init model on GPU
-parallel_context = ParallelContext({"dp": world_size})
-model = apply_data_parallel(
+model = DPWrapper(
         model=model, 
         parallel_context=parallel_context,
         auto_tune=True  # Enable auto tuning for better performance
-    )
+    )  # DPWrapper automatically moves model to rank's GPU
 optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5, weight_decay=1e-1)
 
 for i in tqdm(range(100)):
