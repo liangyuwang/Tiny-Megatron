@@ -41,6 +41,9 @@ def gather_tensor(tensor, axis, group, world_size, rank):
 class ColumnParallelLinear(linear.Linear):
     def __init__(self, in_features, out_features, bias=True, device=None, dtype=None, 
                  parallel_context: ParallelContext = None, auto_tune=False):
+        if parallel_context is None:
+            raise ValueError("parallel_context must be provided for ColumnParallelLinear")
+            
         self.context = parallel_context
         self.tp_size = self.context.parallel_dims["tp"]
         self.tp_rank = self.context.get_rank_in("tp")
@@ -83,6 +86,9 @@ class ColumnParallelLinear(linear.Linear):
 class RowParallelLinear(linear.Linear):
     def __init__(self, in_features, out_features, bias=True, device=None, dtype=None, 
                  parallel_context: ParallelContext = None, auto_tune=False):
+        if parallel_context is None:
+            raise ValueError("parallel_context must be provided for RowParallelLinear")
+            
         self.context = parallel_context
         self.tp_size = self.context.parallel_dims["tp"]
         self.tp_rank = self.context.get_rank_in("tp")
@@ -93,32 +99,45 @@ class RowParallelLinear(linear.Linear):
         super().__init__(local_in, out_features, bias, device, dtype, auto_tune)
 
     def forward_callback(self, ctx, input, weight, bias, runtime_tuner):
+        # Save original input shape for backward
+        original_input = input
+        
         # f: all-gather input from all TP ranks
-        input = dist.all_gather(input, group=self.tp_group)
-        ctx.save_for_backward(input, weight, bias)
-        output = linear.linear_forward(input, weight, bias, runtime_tuner)
+        gathered = [torch.zeros_like(input) for _ in range(self.tp_size)]
+        dist.all_gather(gathered, input, group=self.tp_group)
+        input_gathered = torch.cat(gathered, dim=-1)
+        
+        # Local matrix multiplication
+        output = linear.linear_forward(input_gathered, weight, bias, runtime_tuner)
+        
+        # f: all-reduce output across TP ranks
+        dist.all_reduce(output, group=self.tp_group)
+        
+        ctx.save_for_backward(original_input, input_gathered, weight, bias)
         return ctx, output
 
     def backward_callback(self, ctx, grad_output, runtime_tuner):
-        input, weight, bias = ctx.saved_tensors
+        original_input, input_gathered, weight, bias = ctx.saved_tensors
 
-        grad_input = linear.linear_input_grad(grad_output, input, weight, runtime_tuner) \
+        grad_input_full = linear.linear_input_grad(grad_output, input_gathered, weight, runtime_tuner) \
             if ctx.needs_input_grad[0] else None
-        grad_weight = linear.linear_weight_grad(grad_output, input, weight, runtime_tuner) \
+        grad_weight = linear.linear_weight_grad(grad_output, input_gathered, weight, runtime_tuner) \
             if ctx.needs_input_grad[1] else None
-        grad_bias = linear.linear_bias_grad(grad_output, input, weight, runtime_tuner) \
+        grad_bias = linear.linear_bias_grad(grad_output, input_gathered, weight, runtime_tuner) \
             if bias is not None and ctx.needs_input_grad[2] else None
 
-        # f: grad_input is sliced for local input
-        if grad_input is not None:
-            chunk_size = grad_input.shape[1] // self.tp_size
+        # f: slice grad_input back to local input size
+        if grad_input_full is not None:
+            chunk_size = grad_input_full.shape[-1] // self.tp_size
             start = self.tp_rank * chunk_size
             end = start + chunk_size
-            grad_input = grad_input[:, start:end]
+            grad_input = grad_input_full[..., start:end]
+        else:
+            grad_input = None
 
         # Check if the grad shape is correct
-        if grad_input is not None and grad_input.shape != input.shape:
-            raise RuntimeError(f"grad_input shape {grad_input.shape} is not equal to input shape {input.shape}")
+        if grad_input is not None and grad_input.shape != original_input.shape:
+            raise RuntimeError(f"grad_input shape {grad_input.shape} is not equal to input shape {original_input.shape}")
         if grad_weight is not None and grad_weight.shape != weight.shape:
             raise RuntimeError(f"grad_weight shape {grad_weight.shape} is not equal to weight shape {weight.shape}")
         if grad_bias is not None and grad_bias.shape != bias.shape:

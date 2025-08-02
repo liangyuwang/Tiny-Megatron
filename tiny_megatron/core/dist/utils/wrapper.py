@@ -57,14 +57,14 @@ def get_init_args(module):
         return {
             "in_features": module.in_features,
             "out_features": module.out_features,
-            "bias": module.bias
+            "bias": module.bias is not None
         }
     elif isinstance(module, nn.LayerNorm):
         return {
             "normalized_shape": module.normalized_shape,
             "eps": module.eps,
             "elementwise_affine": module.elementwise_affine,
-            "bias": module.bias
+            "bias": module.bias is not None
         }
     elif isinstance(module, nn.Embedding):
         return {

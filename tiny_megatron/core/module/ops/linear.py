@@ -68,8 +68,10 @@ def _linear_weight_grad_torch(grad_output: torch.Tensor, input: torch.Tensor, we
     return grad_output.t() @ input
 
 def _linear_bias_grad_torch(grad_output: torch.Tensor, input: torch.Tensor, weight: torch.Tensor):
-    if input.dim() > 3:
-        B, M, N = input.shape[0], input.shape[-1], grad_output.shape[-1]
-        K = input.numel() // (B * M)
-        grad_output = grad_output.reshape(B * K, N)
-    return grad_output.sum(0)
+    # bias gradient is just the sum of grad_output over all batch dimensions
+    # grad_output should have shape [batch_size, ..., out_features]
+    # We need to sum over all dimensions except the last one
+    if grad_output.dim() > 2:
+        # Reshape to [*, out_features] and sum over the first dimension
+        grad_output = grad_output.view(-1, grad_output.size(-1))
+    return grad_output.sum(dim=0)

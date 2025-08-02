@@ -16,7 +16,7 @@ from ..autotuner import RuntimeAutoTuner
 class Linear(nn.Linear):
     def __init__(self, in_features: int, out_features: int, bias: bool = True,
                  device=None, dtype=None, auto_tune: bool = False):
-        self.use_bias = False if bias is None else True
+        self.use_bias = bias
         super().__init__(in_features, out_features, self.use_bias)
         self.in_features = in_features
         self.out_features = out_features

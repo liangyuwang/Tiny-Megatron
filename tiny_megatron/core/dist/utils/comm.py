@@ -7,7 +7,7 @@ import torch.distributed as dist
 import math
 
 class ParallelContext:
-    supported_parallel = ["tp", "dp", "pp", "ep", "sp"]
+    supported_parallel = ["tp", "dp", "pp"]
     _group_cache = {}  # avoid creating the same group multiple times
 
     def __init__(self, parallel_dims: dict[str, int]):
@@ -106,7 +106,7 @@ class ParallelContext:
 if __name__=="__main__":
     # initialize distributed environment - force using gloo backend for testing
     dist.init_process_group(
-        backend="gloo",  # use CPU backend to avoid GPU issues
+        backend="gloo",  # use CPU backend to avoid GPU issues, can be changed to nccl if needed and you have enough GPUs
         init_method="env://"
     )
     
