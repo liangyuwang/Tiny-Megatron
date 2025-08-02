@@ -28,15 +28,15 @@ class ParallelContext:
 
     def _compute_coords(self, rank, dims):
         coords = []
-        for dim in reversed(dims):
+        for dim in dims:
             coords.append(rank % dim)
             rank //= dim
-        return list(reversed(coords))
+        return coords
 
     def _coords_to_rank(self, coords):
         rank = 0
         multiplier = 1
-        for dim, coord in zip(reversed(self.dim_sizes), reversed(coords)):
+        for dim, coord in zip(self.dim_sizes, coords):
             rank += coord * multiplier
             multiplier *= dim
         return rank
@@ -117,33 +117,27 @@ if __name__=="__main__":
     
     # select the appropriate configuration based on world_size
     if world_size == 8:
-        config = {"tp": 2, "pp": 2, "dp": 2}
+        config = {"tp": 2, "dp": 2, "pp": 2}
     elif world_size == 4:
         config = {"tp": 2, "dp": 2}
     elif world_size == 2:
-        config = {"tp": 2}
+        config = {"tp": 2, "dp": 1}
     else:
         print(f"Unsupported world_size: {world_size}")
         exit(1)
     
-    print(f"Using config: {config}")
-    
     ctx = ParallelContext(config)
 
-    tp_group = ctx.get_group("tp")
-    tp_rank = ctx.get_rank_in("tp")
-
-    # example: for 8 processes
-    # Rank 0: {'tp': 0, 'pp': 0, 'dp': 0}
-    # Rank 1: {'tp': 1, 'pp': 0, 'dp': 0} 
-    # Rank 2: {'tp': 0, 'pp': 1, 'dp': 0}
-    # Rank 3: {'tp': 1, 'pp': 1, 'dp': 0}
-    # Rank 4: {'tp': 0, 'pp': 0, 'dp': 1}
-    # Rank 5: {'tp': 1, 'pp': 0, 'dp': 1}
-    # Rank 6: {'tp': 0, 'pp': 1, 'dp': 1}
-    # Rank 7: {'tp': 1, 'pp': 1, 'dp': 1}
-    print(f"[Rank {rank}] Coordinates: {ctx.get_coord_dict()}")
-    print(f"[Rank {rank}] TP rank: {tp_rank}")
+    # except example: for 8 processes
+    # Rank 0: {'tp': 0, 'dp': 0, 'pp': 0}
+    # Rank 1: {'tp': 1, 'dp': 0, 'pp': 0} 
+    # Rank 2: {'tp': 0, 'dp': 1, 'pp': 0}
+    # Rank 3: {'tp': 1, 'dp': 1, 'pp': 0}
+    # Rank 4: {'tp': 0, 'dp': 0, 'pp': 1}
+    # Rank 5: {'tp': 1, 'dp': 0, 'pp': 1}
+    # Rank 6: {'tp': 0, 'dp': 1, 'pp': 1}
+    # Rank 7: {'tp': 1, 'dp': 1, 'pp': 1}
+    # print(f"[Rank {rank}] Coordinates: {ctx.get_coord_dict()}")
     ctx.print_debug()
     
     dist.barrier()
