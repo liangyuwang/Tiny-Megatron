@@ -91,7 +91,7 @@ class HybridParallelWrapper(nn.Module):
         """
         wrapped_model = model
         
-        # Step 1: Apply Tensor Parallelism (middle)
+        # Step 1: Apply Tensor Parallelism (innermost)
         if self.tp_size > 1:
             if tp_config is None:
                 raise ValueError("tp_config must be provided when TP size > 1")
@@ -105,7 +105,7 @@ class HybridParallelWrapper(nn.Module):
                 auto_tune=self.auto_tune
             )
         
-        # Step 2: Apply Data Parallelism (innermost)
+        # Step 2: Apply Data Parallelism (middle)
         if self.dp_size > 1:
             print(f"[Rank {self.parallel_context.rank}] Applying Data Parallelism (DP={self.dp_size})")
             wrapped_model = DPWrapper(
