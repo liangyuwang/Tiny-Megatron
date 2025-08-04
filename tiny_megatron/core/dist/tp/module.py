@@ -63,14 +63,18 @@ class ColumnParallelLinear(linear.Linear):
 
         grad_input = linear.linear_input_grad(grad_output, input, weight, runtime_tuner) \
             if ctx.needs_input_grad[0] else None
+        
+        # Apply All-Reduce to grad_input if needed (g in the figure)
+        if grad_input is not None:
+            handle_weight = dist.all_reduce(grad_input, group=self.tp_group, async_op=True)
+
         grad_weight = linear.linear_weight_grad(grad_output, input, weight, runtime_tuner) \
             if ctx.needs_input_grad[1] else None
         grad_bias = linear.linear_bias_grad(grad_output, input, weight, runtime_tuner) \
             if bias is not None and ctx.needs_input_grad[2] else None
 
-        # Apply All-Reduce to grad_input if needed (g in the figure)
-        if grad_input is not None:
-            dist.all_reduce(grad_input, group=self.tp_group)
+        if ctx.needs_input_grad[1] and handle_weight is not None:
+            handle_weight.wait()
 
         # Check if the grad shape is correct
         if grad_input is not None and grad_input.shape != input.shape:
@@ -102,38 +106,24 @@ class RowParallelLinear(linear.Linear):
         # Save original input shape for backward
         original_input = input
         
-        # f: all-gather input from all TP ranks
-        gathered = [torch.zeros_like(input) for _ in range(self.tp_size)]
-        dist.all_gather(gathered, input, group=self.tp_group)
-        input_gathered = torch.cat(gathered, dim=-1)
-        
         # Local matrix multiplication
-        output = linear.linear_forward(input_gathered, weight, bias, runtime_tuner)
+        output = linear.linear_forward(input, weight, bias, runtime_tuner)
         
         # f: all-reduce output across TP ranks
         dist.all_reduce(output, group=self.tp_group)
         
-        ctx.save_for_backward(original_input, input_gathered, weight, bias)
+        ctx.save_for_backward(original_input, input, weight, bias)
         return ctx, output
 
     def backward_callback(self, ctx, grad_output, runtime_tuner):
         original_input, input_gathered, weight, bias = ctx.saved_tensors
 
-        grad_input_full = linear.linear_input_grad(grad_output, input_gathered, weight, runtime_tuner) \
+        grad_input = linear.linear_input_grad(grad_output, input_gathered, weight, runtime_tuner) \
             if ctx.needs_input_grad[0] else None
         grad_weight = linear.linear_weight_grad(grad_output, input_gathered, weight, runtime_tuner) \
             if ctx.needs_input_grad[1] else None
         grad_bias = linear.linear_bias_grad(grad_output, input_gathered, weight, runtime_tuner) \
             if bias is not None and ctx.needs_input_grad[2] else None
-
-        # f: slice grad_input back to local input size
-        if grad_input_full is not None:
-            chunk_size = grad_input_full.shape[-1] // self.tp_size
-            start = self.tp_rank * chunk_size
-            end = start + chunk_size
-            grad_input = grad_input_full[..., start:end]
-        else:
-            grad_input = None
 
         # Check if the grad shape is correct
         if grad_input is not None and grad_input.shape != original_input.shape:

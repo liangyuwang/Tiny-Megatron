@@ -44,7 +44,7 @@ model = GPT2Model(config)   # init model on CPU
 parallel_context = ParallelContext(parallel_config)
 
 # Apply 3D hybrid parallelism
-column_linear_names = ["c_attn"] if parallel_config.get("tp", 1) > 1 else None
+column_linear_names = ["c_attn", "c_fc"] if parallel_config.get("tp", 1) > 1 else None
 row_linear_names = ["c_proj"] if parallel_config.get("tp", 1) > 1 else None
 block_names = ["transformer.h"] if parallel_config.get("pp", 1) > 1 else None
 

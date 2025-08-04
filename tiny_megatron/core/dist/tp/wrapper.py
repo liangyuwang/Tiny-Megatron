@@ -78,16 +78,16 @@ class TPWrapper(nn.Module):
                 
                 # Check if this module should be replaced
                 if child_name in self.column_linear_names:
-                    self._replace_with_column_parallel(module, child_name, child)
+                    self._replace_with_column_parallel(module, child_name, child, full_name)
                 elif child_name in self.row_linear_names:
-                    self._replace_with_row_parallel(module, child_name, child)
+                    self._replace_with_row_parallel(module, child_name, child, full_name)
                 else:
                     # Recursively process children
                     _replace_module_recursive(child, full_name)
         
         _replace_module_recursive(self.model)
     
-    def _replace_with_column_parallel(self, parent_module, module_name, original_module):
+    def _replace_with_column_parallel(self, parent_module, module_name, original_module, full_name):
         """Replace a module with ColumnParallelLinear."""
         if not isinstance(original_module, nn.Linear):
             raise TypeError(f"Module {module_name} is not nn.Linear, cannot replace with ColumnParallelLinear")
@@ -112,9 +112,9 @@ class TPWrapper(nn.Module):
         # Replace the module
         setattr(parent_module, module_name, new_module)
         
-        print(f"Replaced {module_name} with ColumnParallelLinear")
+        print(f"Replaced {full_name} with ColumnParallelLinear")
     
-    def _replace_with_row_parallel(self, parent_module, module_name, original_module):
+    def _replace_with_row_parallel(self, parent_module, module_name, original_module, full_name):
         """Replace a module with RowParallelLinear."""
         if not isinstance(original_module, nn.Linear):
             raise TypeError(f"Module {module_name} is not nn.Linear, cannot replace with RowParallelLinear")
@@ -139,7 +139,7 @@ class TPWrapper(nn.Module):
         # Replace the module
         setattr(parent_module, module_name, new_module)
         
-        print(f"Replaced {module_name} with RowParallelLinear")
+        print(f"Replaced {full_name} with RowParallelLinear")
     
     def _load_sharded_state_dict(self, new_module, original_module, shard_dim):
         """
