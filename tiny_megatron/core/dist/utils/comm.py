@@ -50,14 +50,22 @@ class ParallelContext:
         
         # collect all groups to create
         for i, name in enumerate(self.dim_names):
-            for coord_val in range(self.dim_sizes[i]):
-                group_ranks = []
-                for rank in range(self.world_size):
-                    rank_coords = self._compute_coords(rank, self.dim_sizes)
-                    if rank_coords[i] == coord_val:
-                        group_ranks.append(rank)
+            if name == "pp":
+                # For Pipeline Parallel, all ranks should be in the same group
+                # since they communicate in sequence
+                group_ranks = list(range(self.world_size))
                 group_key = tuple(sorted(group_ranks))
                 all_groups_to_create.add(group_key)
+            else:
+                # For other parallel dimensions (TP, DP), create groups by coordinate
+                for coord_val in range(self.dim_sizes[i]):
+                    group_ranks = []
+                    for rank in range(self.world_size):
+                        rank_coords = self._compute_coords(rank, self.dim_sizes)
+                        if rank_coords[i] == coord_val:
+                            group_ranks.append(rank)
+                    group_key = tuple(sorted(group_ranks))
+                    all_groups_to_create.add(group_key)
         
         # create all groups in a deterministic order (all processes do the same)
         for group_key in sorted(all_groups_to_create):
@@ -67,16 +75,23 @@ class ParallelContext:
         
         # now assign the correct group to the current process
         for i, name in enumerate(self.dim_names):
-            current_coord_in_dim = self.coords[i]
-            group_ranks = []
-            
-            for rank in range(self.world_size):
-                rank_coords = self._compute_coords(rank, self.dim_sizes)
-                if rank_coords[i] == current_coord_in_dim:
-                    group_ranks.append(rank)
-            
-            group_key = tuple(sorted(group_ranks))
-            groups[name] = ParallelContext._group_cache[group_key]
+            if name == "pp":
+                # For Pipeline Parallel, assign the group containing all ranks
+                group_ranks = list(range(self.world_size))
+                group_key = tuple(sorted(group_ranks))
+                groups[name] = ParallelContext._group_cache[group_key]
+            else:
+                # For other parallel dimensions, find group by coordinate
+                current_coord_in_dim = self.coords[i]
+                group_ranks = []
+                
+                for rank in range(self.world_size):
+                    rank_coords = self._compute_coords(rank, self.dim_sizes)
+                    if rank_coords[i] == current_coord_in_dim:
+                        group_ranks.append(rank)
+                
+                group_key = tuple(sorted(group_ranks))
+                groups[name] = ParallelContext._group_cache[group_key]
         
         return groups
 
