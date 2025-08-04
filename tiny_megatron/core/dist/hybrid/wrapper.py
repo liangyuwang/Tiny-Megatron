@@ -91,19 +91,7 @@ class HybridParallelWrapper(nn.Module):
         """
         wrapped_model = model
         
-        # Step 1: Apply Pipeline Parallelism (outermost)
-        if self.pp_size > 1:
-            if pp_config is None:
-                raise ValueError("pp_config must be provided when PP size > 1")
-            
-            print(f"[Rank {self.parallel_context.rank}] Applying Pipeline Parallelism (PP={self.pp_size})")
-            wrapped_model = PPWrapper(
-                model=wrapped_model,
-                parallel_context=self.parallel_context,
-                block_names=pp_config.get("block_names", [])
-            )
-        
-        # Step 2: Apply Tensor Parallelism (middle)
+        # Step 1: Apply Tensor Parallelism (middle)
         if self.tp_size > 1:
             if tp_config is None:
                 raise ValueError("tp_config must be provided when TP size > 1")
@@ -117,13 +105,25 @@ class HybridParallelWrapper(nn.Module):
                 auto_tune=self.auto_tune
             )
         
-        # Step 3: Apply Data Parallelism (innermost)
+        # Step 2: Apply Data Parallelism (innermost)
         if self.dp_size > 1:
             print(f"[Rank {self.parallel_context.rank}] Applying Data Parallelism (DP={self.dp_size})")
             wrapped_model = DPWrapper(
                 model=wrapped_model,
                 parallel_context=self.parallel_context,
                 auto_tune=self.auto_tune
+            )
+        
+        # Step 3: Apply Pipeline Parallelism (outermost)
+        if self.pp_size > 1:
+            if pp_config is None:
+                raise ValueError("pp_config must be provided when PP size > 1")
+            
+            print(f"[Rank {self.parallel_context.rank}] Applying Pipeline Parallelism (PP={self.pp_size})")
+            wrapped_model = PPWrapper(
+                model=wrapped_model,
+                parallel_context=self.parallel_context,
+                block_names=pp_config.get("block_names", [])
             )
         
         return wrapped_model
