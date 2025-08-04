@@ -4,35 +4,41 @@
 
 import torch
 import torch.nn as nn
-from typing import List, Optional, Dict, Any
+from typing import Optional, Dict, List, Any
 
 from ..tp.wrapper import TPWrapper
 from ..dp.wrapper import DPWrapper
+from ..pp.wrapper import PPWrapper
 from ..utils.comm import ParallelContext
 
 
 class HybridParallelWrapper(nn.Module):
     """
-    Hybrid Parallel Wrapper for 2D parallelism (TP + DP).
+    Hybrid Parallel Wrapper supporting 3D parallelism: TP + DP + PP.
     
-    This wrapper combines Tensor Parallelism (inner) and Data Parallelism (outer)
-    by sequentially applying TPWrapper and DPWrapper to the model.
+    This wrapper applies three types of parallelism:
+    - Pipeline Parallel (PP): Splits model across pipeline stages
+    - Tensor Parallel (TP): Splits individual layers across ranks
+    - Data Parallel (DP): Replicates model and synchronizes gradients
     """
     
     def __init__(self, 
                  model: nn.Module, 
                  parallel_context: ParallelContext,
                  tp_config: Optional[Dict[str, Any]] = None,
+                 pp_config: Optional[Dict[str, Any]] = None,
                  auto_tune: bool = False):
         """
         Initialize the Hybrid Parallel wrapper.
         
         Args:
             model (nn.Module): The original model to wrap
-            parallel_context (ParallelContext): The parallel context containing both TP and DP configs
+            parallel_context (ParallelContext): The parallel context containing TP, DP, and PP configs
             tp_config (Dict, optional): TP configuration containing:
                 - column_linear_names (List[str]): Names of modules for column parallel
                 - row_linear_names (List[str]): Names of modules for row parallel
+            pp_config (Dict, optional): PP configuration containing:
+                - block_names (List[str]): Names of block containers to distribute across PP ranks
             auto_tune (bool): Whether to enable auto tuning
         """
         super().__init__()
@@ -43,41 +49,61 @@ class HybridParallelWrapper(nn.Module):
         self.parallel_context = parallel_context
         self.auto_tune = auto_tune
         
-        # Extract TP and DP sizes from parallel context
+        # Extract parallel sizes from parallel context
         self.tp_size = parallel_context.parallel_dims.get("tp", 1)
         self.dp_size = parallel_context.parallel_dims.get("dp", 1)
+        self.pp_size = parallel_context.parallel_dims.get("pp", 1)
         
         # Validate configuration
-        if self.tp_size == 1 and self.dp_size == 1:
-            raise ValueError("At least one of TP or DP must have size > 1 for hybrid parallelism")
+        total_parallel_dims = sum([1 for size in [self.tp_size, self.dp_size, self.pp_size] if size > 1])
+        if total_parallel_dims == 0:
+            raise ValueError("At least one of TP, DP, or PP must have size > 1 for hybrid parallelism")
         
         # Store original model reference
         self.original_model = model
         
         # Apply parallelism layers
-        self.model = self._apply_parallelism(model, tp_config)
+        self.model = self._apply_parallelism(model, tp_config, pp_config)
         
         # Track if we need gradient synchronization (for DP)
         self.require_backward_grad_sync = False
         
         print(f"[Rank {parallel_context.rank}] HybridParallelWrapper initialized:")
-        print(f"  - TP size: {self.tp_size}, DP size: {self.dp_size}")
+        print(f"  - TP size: {self.tp_size}, DP size: {self.dp_size}, PP size: {self.pp_size}")
         print(f"  - Coordinates: {parallel_context.get_coord_dict()}")
     
-    def _apply_parallelism(self, model: nn.Module, tp_config: Optional[Dict[str, Any]]) -> nn.Module:
+    def _apply_parallelism(self, model: nn.Module, tp_config: Optional[Dict[str, Any]], pp_config: Optional[Dict[str, Any]]) -> nn.Module:
         """
-        Apply TP and DP sequentially to the model.
+        Apply PP, TP, and DP sequentially to the model.
+        
+        Application order: PP -> TP -> DP
+        - PP (outermost): Splits model structure across pipeline stages
+        - TP (middle): Splits individual layers across tensor parallel ranks  
+        - DP (innermost): Handles gradient synchronization
         
         Args:
             model: Original model
             tp_config: TP configuration
+            pp_config: PP configuration
             
         Returns:
             Model with parallelism applied
         """
         wrapped_model = model
         
-        # Step 1: Apply Tensor Parallelism (inner parallelism)
+        # Step 1: Apply Pipeline Parallelism (outermost)
+        if self.pp_size > 1:
+            if pp_config is None:
+                raise ValueError("pp_config must be provided when PP size > 1")
+            
+            print(f"[Rank {self.parallel_context.rank}] Applying Pipeline Parallelism (PP={self.pp_size})")
+            wrapped_model = PPWrapper(
+                model=wrapped_model,
+                parallel_context=self.parallel_context,
+                block_names=pp_config.get("block_names", [])
+            )
+        
+        # Step 2: Apply Tensor Parallelism (middle)
         if self.tp_size > 1:
             if tp_config is None:
                 raise ValueError("tp_config must be provided when TP size > 1")
@@ -91,7 +117,7 @@ class HybridParallelWrapper(nn.Module):
                 auto_tune=self.auto_tune
             )
         
-        # Step 2: Apply Data Parallelism (outer parallelism)
+        # Step 3: Apply Data Parallelism (innermost)
         if self.dp_size > 1:
             print(f"[Rank {self.parallel_context.rank}] Applying Data Parallelism (DP={self.dp_size})")
             wrapped_model = DPWrapper(
@@ -163,32 +189,35 @@ def apply_hybrid_parallel(model: nn.Module,
                          parallel_context: ParallelContext,
                          column_linear_names: Optional[List[str]] = None,
                          row_linear_names: Optional[List[str]] = None,
+                         block_names: Optional[List[str]] = None,
                          auto_tune: bool = False) -> HybridParallelWrapper:
     """
-    Apply hybrid parallelism (TP + DP) to a model.
+    Apply hybrid parallelism (TP + DP + PP) to a model.
     
     Args:
         model (nn.Module): The model to apply hybrid parallelism to
-        parallel_context (ParallelContext): The parallel context with TP and DP configuration
+        parallel_context (ParallelContext): The parallel context with TP, DP, and PP configuration
         column_linear_names (List[str], optional): Names of modules for column parallel (TP)
         row_linear_names (List[str], optional): Names of modules for row parallel (TP)
+        block_names (List[str], optional): Names of block containers for pipeline parallel (PP)
         auto_tune (bool): Whether to enable auto tuning
         
     Returns:
         HybridParallelWrapper: The wrapped model with hybrid parallelism applied
         
     Example:
-        >>> # Initialize distributed (8 GPUs: TP=2, DP=4)
+        >>> # Initialize distributed (8 GPUs: TP=2, DP=2, PP=2)
         >>> dist.init_process_group(backend="nccl", init_method="env://")
-        >>> ctx = ParallelContext({"tp": 2, "dp": 4})
+        >>> ctx = ParallelContext({"tp": 2, "dp": 2, "pp": 2})
         >>> 
-        >>> # Apply hybrid parallelism
+        >>> # Apply 3D hybrid parallelism
         >>> model = GPT2Model(config)
         >>> hybrid_model = apply_hybrid_parallel(
         ...     model=model,
         ...     parallel_context=ctx,
-        ...     column_linear_names=["q_proj", "k_proj", "v_proj", "gate_proj", "up_proj"],
-        ...     row_linear_names=["o_proj", "down_proj"],
+        ...     column_linear_names=["c_attn"],
+        ...     row_linear_names=["c_proj"],
+        ...     block_names=["transformer.h"],
         ...     auto_tune=True
         ... )
         >>> 
@@ -196,7 +225,7 @@ def apply_hybrid_parallel(model: nn.Module,
         >>> for batch in dataloader:
         ...     hybrid_model.require_backward_grad_sync = True  # Enable DP grad sync
         ...     loss = hybrid_model(batch)
-        ...     loss.backward()  # TP communication automatic, DP grad sync enabled
+        ...     loss.backward()  # PP+TP communication automatic, DP grad sync enabled
         ...     optimizer.step()
     """
     # Prepare TP configuration
@@ -209,10 +238,20 @@ def apply_hybrid_parallel(model: nn.Module,
             "row_linear_names": row_linear_names or []
         }
     
+    # Prepare PP configuration
+    pp_config = None
+    pp_size = parallel_context.parallel_dims.get("pp", 1)
+    
+    if pp_size > 1:
+        pp_config = {
+            "block_names": block_names or []
+        }
+    
     return HybridParallelWrapper(
         model=model,
         parallel_context=parallel_context,
         tp_config=tp_config,
+        pp_config=pp_config,
         auto_tune=auto_tune
     )
 

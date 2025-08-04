@@ -2,10 +2,10 @@
 # Licensed under the Apache License, Version 2.0
 
 """
-2D Parallelism Training Example: TP (inner) + DP (outer)
+3D Parallelism Training Example: TP (inner) + DP (middle) + PP (outer)
 
-This example demonstrates how to use HybridParallelWrapper for 2D parallelism.
-For 8 GPUs: TP=2 (inner tensor parallelism), DP=4 (outer data parallelism)
+This example demonstrates how to use HybridParallelWrapper for 3D parallelism.
+For 8 GPUs: PP=2 (pipeline stages) x TP=2 (tensor parallel) x DP=2 (data parallel)
 
 Usage:
     torchrun --nproc_per_node=8 example/hybrid/train.py
@@ -29,42 +29,56 @@ world_size = int(os.getenv('WORLD_SIZE', '1'))
 dist.init_process_group(backend='nccl', init_method='env://', world_size=world_size, rank=rank)
 torch.cuda.set_device(rank)
 
-# configure 2D parallelism based on world size
+# configure 3D parallelism based on world size
 if world_size == 8:
-    parallel_config = {"tp": 2, "dp": 4}
+    parallel_config = {"tp": 2, "dp": 2, "pp": 2}  # 3D: 2x2x2
 elif world_size == 4:
-    parallel_config = {"tp": 2, "dp": 2}
+    parallel_config = {"tp": 2, "dp": 2}  # 2D: 2x2 (no PP)
 elif world_size == 2:
-    parallel_config = {"tp": 2, "dp": 1}
+    parallel_config = {"tp": 2, "dp": 1}  # 1D: 2 (TP only)
 else:
     raise ValueError(f"Unsupported world_size: {world_size}. Supported: 2, 4, 8")
 
-parallel_context = ParallelContext(parallel_config)
-dp_rank = parallel_context.get_rank_in("dp")
-torch.manual_seed(dp_rank)  # Different seed for each DP rank
-
-# Different data for different DP ranks, same data within TP group
 config = GPTConfig()
 model = GPT2Model(config)   # init model on CPU
+parallel_context = ParallelContext(parallel_config)
+
+# Apply 3D hybrid parallelism
+column_linear_names = ["c_attn"] if parallel_config.get("tp", 1) > 1 else None
+row_linear_names = ["c_proj"] if parallel_config.get("tp", 1) > 1 else None
+block_names = ["transformer.h"] if parallel_config.get("pp", 1) > 1 else None
+
 model = apply_hybrid_parallel(
-        model=model,
-        parallel_context=parallel_context,
-        column_linear_names=["q_proj", "k_proj", "v_proj", "gate_proj", "up_proj"],
-        row_linear_names=["o_proj", "down_proj"],
-        auto_tune=True
-    )  # HybridWrapper automatically moves model to rank's GPU
+    model=model,
+    parallel_context=parallel_context,
+    column_linear_names=column_linear_names,
+    row_linear_names=row_linear_names,
+    block_names=block_names,
+    auto_tune=False
+)
 
 input = torch.randint(0, config.vocab_size, (1, config.block_size)).cuda()
 target = torch.randint(0, config.vocab_size, (1, config.block_size)).cuda()
+
 optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5, weight_decay=1e-1)
 
 for i in tqdm(range(100)):
     optimizer.zero_grad()
-    if parallel_config["dp"] > 1:
-        model.require_backward_grad_sync = True  # Enable DP gradient sync
-    _, loss = model(input, target)
-    loss.backward()
+    
+    # Enable DP gradient sync for this iteration
+    if hasattr(model, 'require_backward_grad_sync'):
+        model.require_backward_grad_sync = True
+    
+    logits, loss = model(input, target)
+    
+    # For PP, only the last stage will have valid loss
+    pp_size = parallel_config.get("pp", 1)
+    pp_rank = parallel_context.get_rank_in("pp") if pp_size > 1 else 0
+    
+    if pp_rank == pp_size - 1 and loss is not None:
+        tqdm.write(f"iter {i} loss: {loss.item():.4f}")
+        loss.backward()
+    
     optimizer.step()
-    if rank==0: tqdm.write(f"iter {i} loss: {loss.item():.4f}")
 
 dist.destroy_process_group() 
