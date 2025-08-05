@@ -245,9 +245,9 @@ This project is licensed under the Apache License 2.0 - see the [LICENSE](LICENS
 
 ## 🔗 Related Projects
 
-- [Tiny-DeepSpeed](https://github.com/liangyuwang/Tiny-DeepSpeed): Minimalistic DeepSpeed re-implementation
 - [Megatron-LM](https://github.com/NVIDIA/Megatron-LM): Original Megatron library
-- [FairScale](https://github.com/facebookresearch/fairscale): Facebook's model parallelism library
+- [Tiny-FSDP](https://github.com/liangyuwang/Tiny-FSDP): Minimalistic PyTorch FSDP re-implementation
+- [Tiny-DeepSpeed](https://github.com/liangyuwang/Tiny-DeepSpeed): Minimalistic DeepSpeed re-implementation
 
 ## 📖 Citation
 
