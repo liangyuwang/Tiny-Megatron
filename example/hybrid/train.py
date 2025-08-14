@@ -2,13 +2,16 @@
 # Licensed under the Apache License, Version 2.0
 
 """
-3D Parallelism Training Example: TP (inner) + DP (middle) + PP (outer)
+2D Parallelism Training Example: TP (inner) + DP (outer)
 
-This example demonstrates how to use HybridParallelWrapper for 3D parallelism.
-For 8 GPUs: PP=2 (pipeline stages) x TP=2 (tensor parallel) x DP=2 (data parallel)
+This example demonstrates how to use HybridParallelWrapper for 2D parallelism.
+For 8 GPUs: TP=2 (tensor parallel) x DP=4 (data parallel)
+For 4 GPUs: TP=2 (tensor parallel) x DP=2 (data parallel)
 
 Usage:
     torchrun --nproc_per_node=8 example/hybrid/train.py
+    torchrun --nproc_per_node=4 example/hybrid/train.py
+    torchrun --nproc_per_node=2 example/hybrid/train.py
 """
 
 import sys
@@ -29,11 +32,11 @@ world_size = int(os.getenv('WORLD_SIZE', '1'))
 dist.init_process_group(backend='nccl', init_method='env://', world_size=world_size, rank=rank)
 torch.cuda.set_device(rank)
 
-# configure 3D parallelism based on world size
+# configure 2D parallelism based on world size
 if world_size == 8:
-    parallel_config = {"tp": 2, "dp": 2, "pp": 2}  # 3D: 2x2x2
+    parallel_config = {"tp": 2, "dp": 4}  # 2D: 2x4
 elif world_size == 4:
-    parallel_config = {"tp": 2, "dp": 2}  # 2D: 2x2 (no PP)
+    parallel_config = {"tp": 2, "dp": 2}  # 2D: 2x2
 elif world_size == 2:
     parallel_config = {"tp": 2, "dp": 1}  # 1D: 2 (TP only)
 else:
@@ -43,25 +46,17 @@ config = GPTConfig()
 model = GPT2Model(config)   # init model on CPU
 parallel_context = ParallelContext(parallel_config)
 
-# Apply 3D hybrid parallelism
-column_linear_names = ["c_attn", "c_fc"] if parallel_config.get("tp", 1) > 1 else None
-row_linear_names = ["c_proj"] if parallel_config.get("tp", 1) > 1 else None
-block_names = ["transformer.h"] if parallel_config.get("pp", 1) > 1 else None
+# Apply 2D hybrid parallelism
+tp_config = {
+    "column_linear_patterns": ["attn.c_attn", "mlp.c_fc"],  # QKV and FC projections
+    "row_linear_patterns": ["attn.c_proj", "mlp.c_proj"]   # Output projections
+}
 
 model = apply_hybrid_parallel(
-        model=model,
-        parallel_context=parallel_context,
-        # TP configuration using path patterns to avoid name conflicts
-        column_linear_patterns=[
-            "*.attn.c_attn"  # QKV projection in attention blocks (column parallel)
-        ],
-        row_linear_patterns=[
-            "*.attn.c_proj",  # Attention output projection (row parallel)
-            "*.mlp.c_proj"    # MLP output projection (row parallel)
-        ],
-        # PP configuration
-        block_names=["transformer.h"]  # Distribute transformer blocks across PP stages
-    )
+    model=model,
+    parallel_context=parallel_context,
+    tp_config=tp_config
+)
 
 input = torch.randint(0, config.vocab_size, (1, config.block_size)).cuda()
 target = torch.randint(0, config.vocab_size, (1, config.block_size)).cuda()
@@ -77,11 +72,8 @@ for i in tqdm(range(100)):
     
     logits, loss = model(input, target)
     
-    # For PP, only the last stage will have valid loss
-    pp_size = parallel_config.get("pp", 1)
-    pp_rank = parallel_context.get_rank_in("pp") if pp_size > 1 else 0
-    
-    if pp_rank == pp_size - 1 and loss is not None:
+    # Loss is always valid for 2D parallelism (no PP)
+    if loss is not None:
         tqdm.write(f"iter {i} loss: {loss.item():.4f}")
         loss.backward()
     
