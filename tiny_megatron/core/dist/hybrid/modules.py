@@ -54,9 +54,9 @@ class HybridLinear(Linear):
             self.tp_size = parallel_context.parallel_dims.get("tp", 1)
             self.pp_size = parallel_context.parallel_dims.get("pp", 1) 
             self.dp_size = parallel_context.parallel_dims.get("dp", 1)
-            self.tp_rank = parallel_context.get_coord("tp") if self.tp_size > 1 else 0
-            self.pp_rank = parallel_context.get_coord("pp") if self.pp_size > 1 else 0
-            self.dp_rank = parallel_context.get_coord("dp") if self.dp_size > 1 else 0
+            self.tp_rank = parallel_context.get_rank_in("tp") if self.tp_size > 1 else 0
+            self.pp_rank = parallel_context.get_rank_in("pp") if self.pp_size > 1 else 0
+            self.dp_rank = parallel_context.get_rank_in("dp") if self.dp_size > 1 else 0
         else:
             self.tp_size = self.pp_size = self.dp_size = 1
             self.tp_rank = self.pp_rank = self.dp_rank = 0
@@ -78,6 +78,11 @@ class HybridLinear(Linear):
         # Setup pipeline communication if enabled
         if self.pp_enabled and self.pp_size > 1:
             self._setup_pp_communication()
+        else:
+            # Initialize PP attributes to None when PP is not enabled
+            self.pp_group = None
+            self.prev_rank = None
+            self.next_rank = None
     
     def _calculate_dimensions(self, in_features: int, out_features: int):
         """Calculate actual tensor dimensions based on TP mode."""
@@ -105,14 +110,18 @@ class HybridLinear(Linear):
         if self.pp_rank > 0:
             prev_coord = self.parallel_context.get_coord_dict()
             prev_coord["pp"] = self.pp_rank - 1
-            self.prev_rank = self.parallel_context.get_rank(prev_coord)
+            self.prev_rank = self.parallel_context._coords_to_rank(
+                [prev_coord[name] for name in self.parallel_context.dim_names]
+            )
         else:
             self.prev_rank = None
             
         if self.pp_rank < self.pp_size - 1:
             next_coord = self.parallel_context.get_coord_dict()
             next_coord["pp"] = self.pp_rank + 1
-            self.next_rank = self.parallel_context.get_rank(next_coord)
+            self.next_rank = self.parallel_context._coords_to_rank(
+                [next_coord[name] for name in self.parallel_context.dim_names]
+            )
         else:
             self.next_rank = None
     
@@ -161,6 +170,9 @@ class HybridLinear(Linear):
             received_grad = torch.empty_like(grad_output)
             dist.recv(tensor=received_grad, src=self.next_rank, group=self.pp_group)
             grad_output = received_grad
+        
+        # Initialize communication handles
+        tp_handle = None
         
         # Compute gradients
         if ctx.needs_input_grad[0]:
@@ -252,9 +264,19 @@ class HybridLayerNorm(LayerNorm):
         # Setup pipeline communication if enabled
         if self.pp_enabled and parallel_context:
             self.pp_size = parallel_context.parallel_dims.get("pp", 1)
-            self.pp_rank = parallel_context.get_coord("pp") if self.pp_size > 1 else 0
+            self.pp_rank = parallel_context.get_rank_in("pp") if self.pp_size > 1 else 0
             if self.pp_size > 1:
                 self._setup_pp_communication()
+            else:
+                # Initialize PP attributes to None when PP is not enabled
+                self.pp_group = None
+                self.prev_rank = None
+                self.next_rank = None
+        else:
+            # Initialize PP attributes to None when PP is not enabled
+            self.pp_group = None
+            self.prev_rank = None
+            self.next_rank = None
     
     def _setup_pp_communication(self):
         """Setup pipeline parallelism communication parameters."""
@@ -263,14 +285,18 @@ class HybridLayerNorm(LayerNorm):
         if self.pp_rank > 0:
             prev_coord = self.parallel_context.get_coord_dict()
             prev_coord["pp"] = self.pp_rank - 1
-            self.prev_rank = self.parallel_context.get_rank(prev_coord)
+            self.prev_rank = self.parallel_context._coords_to_rank(
+                [prev_coord[name] for name in self.parallel_context.dim_names]
+            )
         else:
             self.prev_rank = None
             
         if self.pp_rank < self.pp_size - 1:
             next_coord = self.parallel_context.get_coord_dict()
             next_coord["pp"] = self.pp_rank + 1
-            self.next_rank = self.parallel_context.get_rank(next_coord)
+            self.next_rank = self.parallel_context._coords_to_rank(
+                [next_coord[name] for name in self.parallel_context.dim_names]
+            )
         else:
             self.next_rank = None
     
@@ -379,8 +405,8 @@ class HybridEmbedding(Embedding):
         if parallel_context:
             self.tp_size = parallel_context.parallel_dims.get("tp", 1)
             self.pp_size = parallel_context.parallel_dims.get("pp", 1)
-            self.tp_rank = parallel_context.get_coord("tp") if self.tp_size > 1 else 0
-            self.pp_rank = parallel_context.get_coord("pp") if self.pp_size > 1 else 0
+            self.tp_rank = parallel_context.get_rank_in("tp") if self.tp_size > 1 else 0
+            self.pp_rank = parallel_context.get_rank_in("pp") if self.pp_size > 1 else 0
         else:
             self.tp_size = self.pp_size = 1
             self.tp_rank = self.pp_rank = 0
@@ -402,6 +428,11 @@ class HybridEmbedding(Embedding):
         # Setup pipeline communication if enabled
         if self.pp_enabled and self.pp_size > 1:
             self._setup_pp_communication()
+        else:
+            # Initialize PP attributes to None when PP is not enabled
+            self.pp_group = None
+            self.prev_rank = None
+            self.next_rank = None
     
     def _setup_pp_communication(self):
         """Setup pipeline parallelism communication parameters."""
@@ -410,7 +441,9 @@ class HybridEmbedding(Embedding):
         if self.pp_rank < self.pp_size - 1:
             next_coord = self.parallel_context.get_coord_dict()
             next_coord["pp"] = self.pp_rank + 1
-            self.next_rank = self.parallel_context.get_rank(next_coord)
+            self.next_rank = self.parallel_context._coords_to_rank(
+                [next_coord[name] for name in self.parallel_context.dim_names]
+            )
         else:
             self.next_rank = None
     

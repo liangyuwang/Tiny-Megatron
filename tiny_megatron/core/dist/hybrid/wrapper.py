@@ -53,9 +53,9 @@ class HybridParallelWrapper(nn.Module):
         self.pp_size = parallel_context.parallel_dims.get("pp", 1)
         
         # Get ranks
-        self.tp_rank = parallel_context.get_coord("tp") if self.tp_size > 1 else 0
-        self.dp_rank = parallel_context.get_coord("dp") if self.dp_size > 1 else 0
-        self.pp_rank = parallel_context.get_coord("pp") if self.pp_size > 1 else 0
+        self.tp_rank = parallel_context.get_rank_in("tp") if self.tp_size > 1 else 0
+        self.dp_rank = parallel_context.get_rank_in("dp") if self.dp_size > 1 else 0
+        self.pp_rank = parallel_context.get_rank_in("pp") if self.pp_size > 1 else 0
         
         # Validate configuration
         total_parallel_dims = sum([1 for size in [self.tp_size, self.dp_size, self.pp_size] if size > 1])
@@ -70,8 +70,17 @@ class HybridParallelWrapper(nn.Module):
         self.pp_config = pp_config or {}
         self.dp_config = dp_config or {}
         
+        # Set target device for hybrid parameters based on rank
+        if torch.cuda.is_available():
+            self.device = torch.device(f"cuda:{parallel_context.rank}")
+        else:
+            self.device = torch.device("cpu")
+        
         # Create hybrid model
         self.model = self._create_hybrid_model(model)
+        
+        # Move entire model to target device
+        self.model = self.model.to(self.device)
         
         # Track gradient sync requirement for DP
         self.require_backward_grad_sync = False
