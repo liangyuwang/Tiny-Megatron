@@ -41,6 +41,10 @@ class PPWrapper(nn.Module):
         self.pp_size = parallel_context.parallel_dims["pp"]
         self.block_names = block_names
         
+        # Calculate previous and next global ranks for communication
+        self.prev_rank = self._pp_rank_to_global_rank(self.pp_rank - 1) if self.pp_rank > 0 else None
+        self.next_rank = self._pp_rank_to_global_rank(self.pp_rank + 1) if self.pp_rank < self.pp_size - 1 else None
+        
         # Set target device for PP parameters based on rank
         if torch.cuda.is_available():
             self.device = torch.device(f"cuda:{parallel_context.rank}")
@@ -56,6 +60,16 @@ class PPWrapper(nn.Module):
         print(f"[Rank {parallel_context.rank}] PPWrapper initialized:")
         print(f"  - PP rank: {self.pp_rank}/{self.pp_size}")
         print(f"  - Coordinates: {parallel_context.get_coord_dict()}")
+    
+    def _pp_rank_to_global_rank(self, pp_rank: int) -> int:
+        """Convert PP rank to global rank."""
+        coords = self.parallel_context.get_coord_dict()
+        target_coords = coords.copy()
+        target_coords['pp'] = pp_rank
+        
+        return self.parallel_context._coords_to_rank(
+            [target_coords[name] for name in self.parallel_context.dim_names]
+        )
     
     def forward(self, *args, **kwargs):
         """Forward pass through the pipeline parallel model with PP orchestration."""
@@ -106,14 +120,15 @@ class PPWrapper(nn.Module):
     
     def _send_to_next_stage(self, tensor: torch.Tensor) -> None:
         """Send tensor to next PP stage."""
-        if self.pp_rank < self.pp_size - 1:
-            next_rank = self.pp_rank + 1
+        if self.next_rank is not None:
             pp_group = self.parallel_context.get_group("pp")
-            dist.send(tensor.contiguous(), dst=next_rank, group=pp_group)
+            dist.send(tensor.contiguous(), dst=self.next_rank, group=pp_group)
     
     def _recv_from_prev_stage(self) -> torch.Tensor:
         """Receive tensor from previous PP stage."""
-        prev_rank = self.pp_rank - 1
+        if self.prev_rank is None:
+            raise RuntimeError("Cannot receive from previous stage: prev_rank is None")
+            
         pp_group = self.parallel_context.get_group("pp")
         
         # Create tensor with appropriate shape (hardcoded for now)
@@ -122,7 +137,7 @@ class PPWrapper(nn.Module):
         tensor = torch.empty(batch_size, seq_len, hidden_size, 
                            dtype=torch.float32, device=self.device)
         
-        dist.recv(tensor, src=prev_rank, group=pp_group)
+        dist.recv(tensor, src=self.prev_rank, group=pp_group)
         return tensor
     
     def _process_middle_stage(self, hidden_states: torch.Tensor) -> torch.Tensor:
