@@ -36,6 +36,7 @@ elif world_size == 4:
     parallel_config = {"tp": 2, "dp": 2}  # 2D: 2x2 (no PP)
 elif world_size == 2:
     parallel_config = {"tp": 2, "dp": 1}  # 1D: 2 (TP only)
+    # parallel_config = {"tp": 1, "dp": 1, "pp": 2}  # 1D: 2 (PP only) - CAUSES DEADLOCK!
 else:
     raise ValueError(f"Unsupported world_size: {world_size}. Supported: 2, 4, 8")
 
@@ -49,19 +50,19 @@ row_linear_names = ["c_proj"] if parallel_config.get("tp", 1) > 1 else None
 block_names = ["transformer.h"] if parallel_config.get("pp", 1) > 1 else None
 
 model = apply_hybrid_parallel(
-        model=model,
-        parallel_context=parallel_context,
-        # TP configuration using path patterns to avoid name conflicts
-        column_linear_patterns=[
-            "*.attn.c_attn"  # QKV projection in attention blocks (column parallel)
-        ],
-        row_linear_patterns=[
-            "*.attn.c_proj",  # Attention output projection (row parallel)
-            "*.mlp.c_proj"    # MLP output projection (row parallel)
-        ],
-        # PP configuration
-        block_names=["transformer.h"]  # Distribute transformer blocks across PP stages
-    )
+    model=model,
+    parallel_context=parallel_context,
+    # TP configuration using path patterns to avoid name conflicts
+    column_linear_patterns=[
+        "*.attn.c_attn"  # QKV projection in attention blocks (column parallel)
+    ],
+    row_linear_patterns=[
+        "*.attn.c_proj",  # Attention output projection (row parallel)
+        "*.mlp.c_proj"    # MLP output projection (row parallel)
+    ],
+    # PP configuration
+    block_names=["transformer.h"]  # Distribute transformer blocks across PP stages
+)
 
 input = torch.randint(0, config.vocab_size, (1, config.block_size)).cuda()
 target = torch.randint(0, config.vocab_size, (1, config.block_size)).cuda()

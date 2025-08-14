@@ -148,8 +148,9 @@ class HybridLinear(Linear):
             dist.all_reduce(output, group=tp_group)
         
         # Handle pipeline parallelism output transmission
-        if self.pp_enabled and self.pp_rank < self.pp_size - 1 and self.next_rank is not None:
-            dist.send(tensor=output, dst=self.next_rank, group=self.pp_group)
+        # NOTE: PP communication should be handled at wrapper level, not module level
+        # if self.pp_enabled and self.pp_rank < self.pp_size - 1 and self.next_rank is not None:
+        #     dist.send(tensor=output, dst=self.next_rank, group=self.pp_group)
         
         return ctx, output
     
@@ -316,8 +317,9 @@ class HybridLayerNorm(LayerNorm):
         ctx.args = args
         
         # Handle pipeline parallelism output transmission  
-        if self.pp_enabled and self.pp_rank < self.pp_size - 1 and self.next_rank is not None:
-            dist.send(tensor=output, dst=self.next_rank, group=self.pp_group)
+        # NOTE: PP communication should be handled at wrapper level, not module level
+        # if self.pp_enabled and self.pp_rank < self.pp_size - 1 and self.next_rank is not None:
+        #     dist.send(tensor=output, dst=self.next_rank, group=self.pp_group)
         
         return ctx, output
     
@@ -464,8 +466,9 @@ class HybridEmbedding(Embedding):
             output = torch.cat(output_list, dim=-1)
         
         # Handle pipeline parallelism output transmission
-        if self.pp_enabled and self.next_rank is not None:
-            dist.send(tensor=output, dst=self.next_rank, group=self.pp_group)
+        # NOTE: PP communication should be handled at wrapper level, not module level
+        # if self.pp_enabled and self.next_rank is not None:
+        #     dist.send(tensor=output, dst=self.next_rank, group=self.pp_group)
         
         return ctx, output
     
