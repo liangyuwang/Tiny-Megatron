@@ -49,13 +49,19 @@ row_linear_names = ["c_proj"] if parallel_config.get("tp", 1) > 1 else None
 block_names = ["transformer.h"] if parallel_config.get("pp", 1) > 1 else None
 
 model = apply_hybrid_parallel(
-    model=model,
-    parallel_context=parallel_context,
-    column_linear_names=column_linear_names,
-    row_linear_names=row_linear_names,
-    block_names=block_names,
-    auto_tune=False
-)
+        model=model,
+        parallel_context=parallel_context,
+        # TP configuration using path patterns to avoid name conflicts
+        column_linear_patterns=[
+            "*.attn.c_attn"  # QKV projection in attention blocks (column parallel)
+        ],
+        row_linear_patterns=[
+            "*.attn.c_proj",  # Attention output projection (row parallel)
+            "*.mlp.c_proj"    # MLP output projection (row parallel)
+        ],
+        # PP configuration
+        block_names=["transformer.h"]  # Distribute transformer blocks across PP stages
+    )
 
 input = torch.randint(0, config.vocab_size, (1, config.block_size)).cuda()
 target = torch.randint(0, config.vocab_size, (1, config.block_size)).cuda()
