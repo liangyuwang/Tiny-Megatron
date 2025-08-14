@@ -25,7 +25,9 @@ parallel_context = ParallelContext({"pp": world_size})
 model = apply_pipeline_parallel(    # apply PP to transformer blocks
     model=model,
     parallel_context=parallel_context,
-    block_names=["transformer.h"]
+    block_names=["transformer.h"],
+    pre_modules=["transformer.wte", "transformer.wpe"],
+    post_modules=["transformer.ln_f", "lm_head"]
 )
 input = torch.randint(0, config.vocab_size, (1, config.block_size)).cuda()
 target = torch.randint(0, config.vocab_size, (1, config.block_size)).cuda()
