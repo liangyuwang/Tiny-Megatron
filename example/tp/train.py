@@ -22,6 +22,8 @@ torch.cuda.set_device(rank)
 config = GPTConfig()
 input = torch.randint(0, config.vocab_size, (1, config.block_size)).cuda()
 target = torch.randint(0, config.vocab_size, (1, config.block_size)).cuda()
+# sync data to simulate tensor parallel
+dist.all_reduce(input); dist.all_reduce(target)
 model = GPT2Model(config)   # init model on CPU
 parallel_context = ParallelContext({"tp": world_size})
 model = TPWrapper(

@@ -60,6 +60,8 @@ model = apply_hybrid_parallel(
 
 input = torch.randint(0, config.vocab_size, (1, config.block_size)).cuda()
 target = torch.randint(0, config.vocab_size, (1, config.block_size)).cuda()
+# sync data to simulate tensor parallel
+dist.all_reduce(input, group=parallel_context.get_group("tp")); dist.all_reduce(target, group=parallel_context.get_group("tp"))
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5, weight_decay=1e-1)
 
