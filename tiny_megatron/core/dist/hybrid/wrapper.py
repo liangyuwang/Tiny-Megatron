@@ -57,9 +57,6 @@ class HybridParallelWrapper(nn.Module):
         if total_parallel_dims == 0:
             raise ValueError("At least one of TP or DP must have size > 1 for hybrid parallelism")
         
-        # Store original model reference
-        self.original_model = model
-        
         # Store configurations
         self.tp_config = tp_config or {}
         self.dp_config = dp_config or {}
@@ -77,7 +74,7 @@ class HybridParallelWrapper(nn.Module):
         self.model = self.model.to(self.device)
         
         # Initialize DP state for gradient synchronization
-        self.require_backward_grad_sync = True
+        self.require_backward_grad_sync = False
         
         print(f"[Rank {parallel_context.rank}] HybridParallelWrapper initialized:")
         print(f"  - TP size: {self.tp_size}, DP size: {self.dp_size}")
@@ -306,10 +303,14 @@ class HybridParallelWrapper(nn.Module):
                 hybrid_module.weight.copy_(original_module.weight)
 
     def forward(self, *args, **kwargs):
-        """Forward pass through the unified hybrid model."""
-        # All communication is handled internally by hybrid modules
-        # No need for additional DP synchronization here since it's handled in backward_callback
+        if self.require_backward_grad_sync:
+            self.enable_grad_sync()
+        self.require_backward_grad_sync = False
         return self.model(*args, **kwargs)
+
+    def enable_grad_sync(self):
+        for param in self.model.parameters():
+            setattr(param, 'dp_bwd_sync', True)
 
     def get_hybrid_info(self):
         """Get information about the hybrid configuration."""

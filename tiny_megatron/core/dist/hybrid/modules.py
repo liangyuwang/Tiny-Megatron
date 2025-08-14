@@ -8,6 +8,7 @@ from typing import Optional
 from ...module import Linear, LayerNorm, Embedding
 from ...module.ops import linear, layernorm, embedding
 from ..utils.comm import ParallelContext
+from .utils import Parameter
 
 
 class HybridLinear(Linear):
@@ -70,6 +71,13 @@ class HybridLinear(Linear):
         # Initialize base Linear with potentially modified dimensions
         super().__init__(actual_in_features, actual_out_features, bias, device, dtype, auto_tune)
         
+    def _init_parameters(self):
+        self.weight = Parameter(torch.empty((self.out_features, self.in_features), **self.factory_kwargs))
+        if self.use_bias:
+            self.bias = Parameter(torch.empty(self.out_features, **self.factory_kwargs))
+        else:
+            self.register_parameter('bias', None)
+        self.reset_parameters()
     
     def _calculate_dimensions(self, in_features: int, out_features: int):
         """Calculate actual tensor dimensions based on TP mode."""
@@ -115,9 +123,6 @@ class HybridLinear(Linear):
         """
         input, weight, bias = ctx.saved_tensors
         
-        # Initialize communication handles
-        tp_handle = None
-        
         # Compute gradients
         if ctx.needs_input_grad[0]:
             grad_input = linear.linear_input_grad(grad_output, input, weight, runtime_tuner)
@@ -129,7 +134,9 @@ class HybridLinear(Linear):
             # Column parallel: all_reduce grad_input across TP ranks
             tp_group = self.parallel_context.get_group("tp")
             tp_handle = dist.all_reduce(grad_input, group=tp_group, async_op=True)
-        
+        else:
+            tp_handle = None
+
         if ctx.needs_input_grad[1]:
             grad_weight = linear.linear_weight_grad(grad_output, input, weight, runtime_tuner)
         else:
@@ -147,12 +154,14 @@ class HybridLinear(Linear):
         # Handle data parallelism gradient synchronization
         if self.dp_enabled and self.dp_size > 1:
             dp_group = self.parallel_context.get_group("dp")
-            if grad_weight is not None:
+            if grad_weight is not None and self.weight.dp_bwd_sync:
                 dist.all_reduce(grad_weight, group=dp_group)
                 grad_weight = grad_weight / self.dp_size
-            if grad_bias is not None:
+                self.weight.dp_bwd_sync = False
+            if grad_bias is not None and self.bias.dp_bwd_sync:
                 dist.all_reduce(grad_bias, group=dp_group)
                 grad_bias = grad_bias / self.dp_size
+                self.bias.dp_bwd_sync = False
         
         # Validate gradient shapes
         if grad_input is not None and grad_input.shape != input.shape:
@@ -198,6 +207,44 @@ class HybridLayerNorm(LayerNorm):
         # Initialize base LayerNorm
         super().__init__(normalized_shape, eps, elementwise_affine, bias, device, dtype, auto_tune)
         
+    def _init_parameters(self):
+        if self.elementwise_affine:
+            self.weight = Parameter(torch.empty(self.normalized_shape, **self.factory_kwargs))
+            if self.use_bias:
+                self.bias = Parameter(torch.empty(self.normalized_shape, **self.factory_kwargs))
+            else:
+                self.register_parameter('bias', None)
+        else:
+            self.register_parameter('weight', None)
+            self.register_parameter('bias', None)
+        self.reset_parameters()
+
+    def backward_callback(self, ctx, grad_output, eps, runtime_tuner):
+        input, weight, bias, mean, rstd = ctx.saved_tensors
+        args = {
+            'BLOCK_SIZE': ctx.args['BLOCK_SIZE'],
+            'num_warps': ctx.args['num_warps'],
+            'eps': eps,
+        }
+        dx, dw_, db_, args = layernorm.layernorm_dx(grad_output, input, weight, bias, mean, rstd, args, runtime_tuner)
+        dw, db = layernorm.layernorm_dwdb(weight, bias, dw_, db_, args, runtime_tuner)
+        if self.weight.dp_bwd_sync:    # core step of ddp
+            dist.all_reduce(dw, async_op=False)
+            self.weight.dp_bwd_sync = False
+        if self.bias.dp_bwd_sync:  # core step of ddp
+            dist.all_reduce(db, async_op=False)
+            self.bias.bwd_sync = False
+        
+        # Check if the grad shape is correct
+        if dx is not None and dx.shape != input.shape:
+            raise RuntimeError(f"grad_input shape {dx.shape} is not equal to input shape {input.shape}")
+        if dw is not None and dw.shape != weight.shape:
+            raise RuntimeError(f"grad_weight shape {dw.shape} is not equal to weight shape {weight.shape}")
+        if db is not None and db.shape != bias.shape:
+            raise RuntimeError(f"grad_bias shape {db.shape} is not equal to bias shape {bias.shape}")
+
+        return dx, dw, db
+
 
 class HybridEmbedding(Embedding):
     """
@@ -263,6 +310,16 @@ class HybridEmbedding(Embedding):
         super().__init__(num_embeddings, local_embedding_dim, padding_idx, max_norm, norm_type,
                          scale_grad_by_freq, sparse, _weight, _freeze, device, dtype, auto_tune)
         
+    def _init_parameters(self):
+        if self._weight is None:
+            self.weight = Parameter(torch.empty((self.num_embeddings, self.embedding_dim), **self.factory_kwargs),
+                                    requires_grad=not self._freeze)
+            self.reset_parameters()
+        else:
+            assert list(self._weight.shape) == [self.num_embeddings, self.embedding_dim], \
+                'Shape of weight does not match num_embeddings and embedding_dim'
+            self.weight = Parameter(self._weight, requires_grad=not self._freeze)
+
     
     def forward_callback(self, ctx, input, weight, padding_idx, max_norm, norm_type, runtime_tuner):
         """
@@ -299,6 +356,9 @@ class HybridEmbedding(Embedding):
         # Compute weight gradient
         if ctx.needs_input_grad[1]:
             grad_weight = embedding.embedding_weight_grad(grad_output, input, weight, runtime_tuner)
+            if self.weight.dp_bwd_sync:    # core step of ddp
+                dist.all_reduce(grad_weight, async_op=False)
+                self.weight.dp_bwd_sync = False
         else:
             grad_weight = None
 
