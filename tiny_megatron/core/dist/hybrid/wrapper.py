@@ -3,6 +3,7 @@
 
 import torch
 import torch.nn as nn
+import torch.distributed as dist
 import copy
 from typing import Optional, Dict, List, Any
 from ..utils.comm import ParallelContext
@@ -57,6 +58,16 @@ class HybridParallelWrapper(nn.Module):
         self.dp_rank = parallel_context.get_rank_in("dp") if self.dp_size > 1 else 0
         self.pp_rank = parallel_context.get_rank_in("pp") if self.pp_size > 1 else 0
         
+        # Calculate previous and next global ranks for PP communication
+        if self.pp_size > 1:
+            self.prev_rank = self._pp_rank_to_global_rank(self.pp_rank - 1) if self.pp_rank > 0 else None
+            self.next_rank = self._pp_rank_to_global_rank(self.pp_rank + 1) if self.pp_rank < self.pp_size - 1 else None
+            self.pp_group = parallel_context.get_group("pp")
+        else:
+            self.prev_rank = None
+            self.next_rank = None
+            self.pp_group = None
+        
         # Validate configuration
         total_parallel_dims = sum([1 for size in [self.tp_size, self.dp_size, self.pp_size] if size > 1])
         if total_parallel_dims == 0:
@@ -88,6 +99,16 @@ class HybridParallelWrapper(nn.Module):
         print(f"[Rank {parallel_context.rank}] HybridParallelWrapper initialized:")
         print(f"  - TP size: {self.tp_size}, DP size: {self.dp_size}, PP size: {self.pp_size}")
         print(f"  - Coordinates: {parallel_context.get_coord_dict()}")
+    
+    def _pp_rank_to_global_rank(self, pp_rank: int) -> int:
+        """Convert PP rank to global rank."""
+        coords = self.parallel_context.get_coord_dict()
+        target_coords = coords.copy()
+        target_coords['pp'] = pp_rank
+        
+        return self.parallel_context._coords_to_rank(
+            [target_coords[name] for name in self.parallel_context.dim_names]
+        )
     
     def _create_hybrid_model(self, model: nn.Module) -> nn.Module:
         """
@@ -454,13 +475,57 @@ class HybridParallelWrapper(nn.Module):
                 hybrid_module.weight.copy_(original_module.weight)
     
     def forward(self, *args, **kwargs):
-        """Forward pass through the unified hybrid model."""
+        """Forward pass through the unified hybrid model with PP orchestration."""
         # Handle DP gradient synchronization
         if self.dp_size > 1 and self.require_backward_grad_sync:
             self._enable_grad_sync()
             self.require_backward_grad_sync = False
         
-        return self.model(*args, **kwargs)
+        # Handle pipeline parallelism if enabled
+        if self.pp_size > 1:
+            return self._forward_with_pipeline(*args, **kwargs)
+        else:
+            # No PP: direct forward pass
+            return self.model(*args, **kwargs)
+    
+    def _forward_with_pipeline(self, *args, **kwargs):
+        """Forward pass with pipeline parallelism orchestration."""
+        # Stage 0 (first): process initial layers and send to next stage
+        if self.pp_rank == 0:
+            # Process through assigned layers
+            hidden_states = self._process_first_stage(*args, **kwargs)
+            
+            # Send to next stage if not single stage
+            if self.pp_size > 1:
+                self._send_to_next_stage(hidden_states)
+            else:
+                # Single stage - process everything (shouldn't reach here in PP mode)
+                return self.model(*args, **kwargs)
+            
+            # For multi-stage, first stage doesn't return final output
+            return None, None
+            
+        # Stage N-1 (last): receive from previous, process final layers
+        elif self.pp_rank == self.pp_size - 1:
+            # Receive hidden states from previous stage
+            hidden_states = self._recv_from_prev_stage()
+            
+            # Process final layers and compute loss
+            return self._process_last_stage(hidden_states, *args, **kwargs)
+            
+        # Middle stages: receive, process assigned blocks, send
+        else:
+            # Receive from previous stage
+            hidden_states = self._recv_from_prev_stage()
+            
+            # Process through assigned blocks
+            output = self._process_middle_stage(hidden_states)
+            
+            # Send to next stage
+            self._send_to_next_stage(output)
+            
+            # Middle stages don't return final output
+            return None, None
     
     def _enable_grad_sync(self):
         """Enable gradient synchronization for DP."""
@@ -495,6 +560,56 @@ class HybridParallelWrapper(nn.Module):
         print(f"  TP size: {info['tp_size']}, DP size: {info['dp_size']}, PP size: {info['pp_size']}")
         print(f"  Total params: {info['total_parameters']:,}")
         print(f"  Trainable params: {info['trainable_parameters']:,}")
+
+
+    def _send_to_next_stage(self, tensor: torch.Tensor) -> None:
+        """Send tensor to next PP stage."""
+        if self.next_rank is not None:
+            dist.send(tensor.contiguous(), dst=self.next_rank, group=self.pp_group)
+    
+    def _recv_from_prev_stage(self) -> torch.Tensor:
+        """Receive tensor from previous PP stage."""
+        if self.prev_rank is None:
+            raise RuntimeError("Cannot receive from previous stage: prev_rank is None")
+            
+        # Create tensor with appropriate shape (hardcoded for now)
+        # In practice, this would be negotiated or pre-agreed
+        batch_size, seq_len, hidden_size = 1, 1024, 768
+        tensor = torch.empty(batch_size, seq_len, hidden_size, 
+                           dtype=torch.float32, device=self.device)
+        
+        dist.recv(tensor, src=self.prev_rank, group=self.pp_group)
+        return tensor
+    
+    def _process_first_stage(self, *args, **kwargs):
+        """Process the first stage of the pipeline."""
+        # For first stage, run the model up to the first cut point
+        # This is a simplified implementation - in practice, would need to
+        # identify where to cut the model based on block_names
+        hidden_states = self.model(*args, **kwargs)
+        if isinstance(hidden_states, tuple):
+            hidden_states = hidden_states[0]  # Take hidden states, ignore loss
+        return hidden_states
+    
+    def _process_middle_stage(self, hidden_states):
+        """Process middle stage of the pipeline."""
+        # Run model with received hidden states
+        # This is simplified - would need proper input handling
+        return self.model(hidden_states)
+    
+    def _process_last_stage(self, hidden_states, *args, **kwargs):
+        """Process the last stage of the pipeline."""
+        # Run final layers and compute loss if target is provided
+        logits = self.model(hidden_states)
+        
+        # Compute loss if target is provided
+        if len(args) > 1:  # Assuming target is the second argument
+            target = args[1]
+            loss_fn = torch.nn.CrossEntropyLoss()
+            loss = loss_fn(logits.view(-1, logits.size(-1)), target.view(-1))
+            return logits, loss
+        else:
+            return logits, None
 
 
 def apply_hybrid_parallel(model: nn.Module,

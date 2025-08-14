@@ -130,10 +130,11 @@ class HybridLinear(Linear):
         Override forward callback to insert hybrid parallelism communication.
         """
         # Handle pipeline parallelism input reception
-        if self.pp_enabled and self.pp_rank > 0 and self.prev_rank is not None:
-            received_input = torch.empty_like(input)
-            dist.recv(tensor=received_input, src=self.prev_rank, group=self.pp_group)
-            input = received_input
+        # NOTE: PP communication is now handled at wrapper level, not module level
+        # if self.pp_enabled and self.pp_rank > 0 and self.prev_rank is not None:
+        #     received_input = torch.empty_like(input)
+        #     dist.recv(tensor=received_input, src=self.prev_rank, group=self.pp_group)
+        #     input = received_input
         
         # Save tensors for backward
         ctx.save_for_backward(input, weight, bias)
@@ -306,10 +307,11 @@ class HybridLayerNorm(LayerNorm):
         Override forward callback to insert pipeline parallelism communication.
         """
         # Handle pipeline parallelism input reception
-        if self.pp_enabled and self.pp_rank > 0 and self.prev_rank is not None:
-            received_input = torch.empty_like(input)
-            dist.recv(tensor=received_input, src=self.prev_rank, group=self.pp_group)
-            input = received_input
+        # NOTE: PP communication is now handled at wrapper level, not module level
+        # if self.pp_enabled and self.pp_rank > 0 and self.prev_rank is not None:
+        #     received_input = torch.empty_like(input)
+        #     dist.recv(tensor=received_input, src=self.prev_rank, group=self.pp_group)
+        #     input = received_input
         
         # Perform LayerNorm computation
         output, mean, rstd, args = layernorm.layernorm_fwd(input, weight, bias, eps, runtime_tuner)
