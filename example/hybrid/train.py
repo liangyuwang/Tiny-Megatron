@@ -69,8 +69,7 @@ for i in tqdm(range(100)):
     optimizer.zero_grad()
     
     # Enable DP gradient sync for this iteration
-    if hasattr(model, 'require_backward_grad_sync'):
-        model.require_backward_grad_sync = True
+    model.require_backward_grad_sync = True
     
     logits, loss = model(input, target)
     

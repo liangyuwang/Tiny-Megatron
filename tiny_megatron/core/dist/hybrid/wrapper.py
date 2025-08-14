@@ -74,7 +74,7 @@ class HybridParallelWrapper(nn.Module):
         self.model = self.model.to(self.device)
         
         # Initialize DP state for gradient synchronization
-        self.require_backward_grad_sync = False
+        self.require_dp_backward_grad_sync = False
         
         print(f"[Rank {parallel_context.rank}] HybridParallelWrapper initialized:")
         print(f"  - TP size: {self.tp_size}, DP size: {self.dp_size}")
@@ -303,9 +303,9 @@ class HybridParallelWrapper(nn.Module):
                 hybrid_module.weight.copy_(original_module.weight)
 
     def forward(self, *args, **kwargs):
-        if self.require_backward_grad_sync:
+        if self.require_dp_backward_grad_sync:
             self.enable_grad_sync()
-        self.require_backward_grad_sync = False
+        self.require_dp_backward_grad_sync = False
         return self.model(*args, **kwargs)
 
     def enable_grad_sync(self):
