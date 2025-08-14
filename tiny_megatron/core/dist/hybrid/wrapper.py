@@ -34,10 +34,8 @@ class HybridParallelWrapper(nn.Module):
             model (nn.Module): The original model to wrap
             parallel_context (ParallelContext): The parallel context containing TP, DP, and PP configs
             tp_config (Dict, optional): TP configuration containing:
-                - column_linear_names (List[str]): Names of modules for column parallel
-                - row_linear_names (List[str]): Names of modules for row parallel  
-                - qkv_column_names (List[str]): Names of QKV column parallel modules
-                - qkv_row_names (List[str]): Names of QKV row parallel modules
+                - column_linear_patterns (List[str]): Path patterns for column parallel modules
+                - row_linear_patterns (List[str]): Path patterns for row parallel modules
             pp_config (Dict, optional): PP configuration containing:
                 - block_names (List[str]): Names of block containers to distribute across PP ranks
             dp_config (Dict, optional): DP configuration (reserved for future use)
@@ -78,7 +76,7 @@ class HybridParallelWrapper(nn.Module):
         # Track gradient sync requirement for DP
         self.require_backward_grad_sync = False
         
-        print(f"[Rank {parallel_context.rank}] UnifiedHybridWrapper initialized:")
+        print(f"[Rank {parallel_context.rank}] HybridParallelWrapper initialized:")
         print(f"  - TP size: {self.tp_size}, DP size: {self.dp_size}, PP size: {self.pp_size}")
         print(f"  - Coordinates: {parallel_context.get_coord_dict()}")
     
@@ -95,11 +93,9 @@ class HybridParallelWrapper(nn.Module):
         # Create a deep copy of the model
         model_copy = copy.deepcopy(model)
         
-        # Get module name lists from configurations
-        column_linear_names = self.tp_config.get("column_linear_names", [])
-        row_linear_names = self.tp_config.get("row_linear_names", [])
-        qkv_column_names = self.tp_config.get("qkv_column_names", [])
-        qkv_row_names = self.tp_config.get("qkv_row_names", [])
+        # Get module pattern lists from configurations
+        column_linear_patterns = self.tp_config.get("column_linear_patterns", [])
+        row_linear_patterns = self.tp_config.get("row_linear_patterns", [])
         block_names = self.pp_config.get("block_names", [])
         
         # Determine which blocks belong to this PP rank
@@ -111,10 +107,8 @@ class HybridParallelWrapper(nn.Module):
         self._replace_modules_recursive(
             model_copy, 
             "", 
-            column_linear_names,
-            row_linear_names,
-            qkv_column_names,
-            qkv_row_names,
+            column_linear_patterns,
+            row_linear_patterns,
             pp_owned_blocks
         )
         
@@ -166,10 +160,8 @@ class HybridParallelWrapper(nn.Module):
     def _replace_modules_recursive(self, 
                                    module: nn.Module, 
                                    module_path: str,
-                                   column_linear_names: List[str],
-                                   row_linear_names: List[str], 
-                                   qkv_column_names: List[str],
-                                   qkv_row_names: List[str],
+                                   column_linear_patterns: List[str],
+                                   row_linear_patterns: List[str], 
                                    pp_owned_blocks: set):
         """
         Recursively replace modules with hybrid versions.
@@ -177,10 +169,8 @@ class HybridParallelWrapper(nn.Module):
         Args:
             module: Current module being processed
             module_path: Dot-separated path to current module
-            column_linear_names: Names for column parallel TP
-            row_linear_names: Names for row parallel TP
-            qkv_column_names: Names for QKV column parallel TP
-            qkv_row_names: Names for QKV row parallel TP
+            column_linear_patterns: Path patterns for column parallel TP
+            row_linear_patterns: Path patterns for row parallel TP
             pp_owned_blocks: Set of block paths owned by current PP rank
         """
         for child_name, child_module in list(module.named_children()):
@@ -191,8 +181,7 @@ class HybridParallelWrapper(nn.Module):
             
             # Replace Linear modules
             if isinstance(child_module, nn.Linear):
-                tp_mode = self._get_tp_mode(child_name, column_linear_names, row_linear_names, 
-                                           qkv_column_names, qkv_row_names)
+                tp_mode = self._get_tp_mode(full_path, column_linear_patterns, row_linear_patterns)
                 
                 if tp_mode != "none" or pp_enabled:
                     new_module = self._create_hybrid_linear(child_module, tp_mode, pp_enabled)
@@ -221,9 +210,8 @@ class HybridParallelWrapper(nn.Module):
             
             else:
                 # Recursively process children
-                self._replace_modules_recursive(child_module, full_path, column_linear_names, 
-                                              row_linear_names, qkv_column_names, qkv_row_names, 
-                                              pp_owned_blocks)
+                self._replace_modules_recursive(child_module, full_path, column_linear_patterns, 
+                                              row_linear_patterns, pp_owned_blocks)
     
     def _get_custom_layernorm_class(self):
         """Get custom LayerNorm class if available."""
@@ -261,36 +249,83 @@ class HybridParallelWrapper(nn.Module):
         
         return False
     
-    def _get_tp_mode(self, module_name: str, column_names: List[str], row_names: List[str],
-                     qkv_column_names: List[str], qkv_row_names: List[str]) -> str:
-        """Determine TP mode for a module."""
+    def _get_tp_mode(self, module_path: str, column_patterns: List[str], row_patterns: List[str]) -> str:
+        """
+        Determine TP mode for a module based on its full path.
+        
+        Args:
+            module_path: Full dot-separated path to the module
+            column_patterns: List of path patterns for column parallel
+            row_patterns: List of path patterns for row parallel
+            
+        Returns:
+            TP mode: "none", "column", or "row"
+        """
         if self.tp_size <= 1:
             return "none"
         
-        if module_name in qkv_column_names:
-            return "qkv_column"
-        elif module_name in qkv_row_names:
-            return "qkv_row"
-        elif module_name in column_names:
-            return "column"
-        elif module_name in row_names:
-            return "row"
-        else:
-            return "none"
+        # Check against column parallel patterns
+        for pattern in column_patterns:
+            if self._path_matches_pattern(module_path, pattern):
+                return "column"
+        
+        # Check against row parallel patterns
+        for pattern in row_patterns:
+            if self._path_matches_pattern(module_path, pattern):
+                return "row"
+        
+        return "none"
+    
+    def _path_matches_pattern(self, module_path: str, pattern: str) -> bool:
+        """
+        Check if a module path matches a pattern.
+        
+        Supports simple wildcard matching with '*' for any part.
+        
+        Args:
+            module_path: Full path like "transformer.h.0.attn.c_attn"
+            pattern: Pattern like "*.attn.c_attn" or "transformer.h.*.attn.c_proj"
+            
+        Returns:
+            True if path matches pattern
+        """
+        path_parts = module_path.split('.')
+        pattern_parts = pattern.split('.')
+        
+        # Simple wildcard matching
+        if len(path_parts) != len(pattern_parts):
+            return False
+        
+        for path_part, pattern_part in zip(path_parts, pattern_parts):
+            if pattern_part != '*' and pattern_part != path_part:
+                return False
+        
+        return True
     
     def _create_hybrid_linear(self, original_module: nn.Linear, tp_mode: str, pp_enabled: bool) -> HybridLinear:
         """Create a HybridLinear module from original Linear module."""
-        return HybridLinear(
+        # Get original device and dtype
+        device = original_module.weight.device
+        dtype = original_module.weight.dtype
+        
+        # Create hybrid module
+        hybrid_module = HybridLinear(
             in_features=original_module.in_features,
             out_features=original_module.out_features,
             bias=original_module.bias is not None,
+            device=device,
+            dtype=dtype,
+            auto_tune=False,  # Can be made configurable
             parallel_context=self.parallel_context,
             tp_mode=tp_mode,
             pp_enabled=pp_enabled,
-            dp_enabled=self.dp_size > 1,
-            device=original_module.weight.device,
-            dtype=original_module.weight.dtype
+            dp_enabled=self.dp_size > 1
         )
+        
+        # Transfer state dict with proper weight sharding for TP
+        self._transfer_linear_state_dict(hybrid_module, original_module, tp_mode)
+        
+        return hybrid_module
     
     def _create_hybrid_layernorm(self, original_module: nn.Module, pp_enabled: bool) -> HybridLayerNorm:
         """Create a HybridLayerNorm module from original LayerNorm module."""
@@ -299,31 +334,115 @@ class HybridParallelWrapper(nn.Module):
             normalized_shape = original_module.normalized_shape
         else:
             # For custom LayerNorm, infer from weight shape
-            normalized_shape = original_module.weight.shape
+            normalized_shape = original_module.weight.shape if original_module.weight is not None else (768,)
         
-        return HybridLayerNorm(
+        # Get original device and dtype
+        device = original_module.weight.device if original_module.weight is not None else None
+        dtype = original_module.weight.dtype if original_module.weight is not None else None
+        
+        # Create hybrid module
+        hybrid_module = HybridLayerNorm(
             normalized_shape=normalized_shape,
             eps=getattr(original_module, 'eps', 1e-5),
             elementwise_affine=original_module.weight is not None,
             bias=original_module.bias is not None,
+            device=device,
+            dtype=dtype,
+            auto_tune=False,  # Can be made configurable
             parallel_context=self.parallel_context,
-            pp_enabled=pp_enabled,
-            device=original_module.weight.device if original_module.weight is not None else None,
-            dtype=original_module.weight.dtype if original_module.weight is not None else None
+            pp_enabled=pp_enabled
         )
+        
+        # Transfer state dict
+        self._transfer_layernorm_state_dict(hybrid_module, original_module)
+        
+        return hybrid_module
     
     def _create_hybrid_embedding(self, original_module: nn.Embedding, tp_enabled: bool, pp_enabled: bool) -> HybridEmbedding:
         """Create a HybridEmbedding module from original Embedding module."""
-        return HybridEmbedding(
+        # Get original device and dtype
+        device = original_module.weight.device
+        dtype = original_module.weight.dtype
+        
+        # Create hybrid module
+        hybrid_module = HybridEmbedding(
             num_embeddings=original_module.num_embeddings,
             embedding_dim=original_module.embedding_dim,
             padding_idx=original_module.padding_idx,
+            max_norm=getattr(original_module, 'max_norm', None),
+            norm_type=getattr(original_module, 'norm_type', 2.0),
+            scale_grad_by_freq=getattr(original_module, 'scale_grad_by_freq', False),
+            sparse=getattr(original_module, 'sparse', False),
+            device=device,
+            dtype=dtype,
+            auto_tune=False,  # Can be made configurable
             parallel_context=self.parallel_context,
             tp_enabled=tp_enabled,
-            pp_enabled=pp_enabled,
-            device=original_module.weight.device,
-            dtype=original_module.weight.dtype
+            pp_enabled=pp_enabled
         )
+        
+        # Transfer state dict with proper weight sharding for TP
+        self._transfer_embedding_state_dict(hybrid_module, original_module, tp_enabled)
+        
+        return hybrid_module
+    
+    def _transfer_linear_state_dict(self, hybrid_module: HybridLinear, original_module: nn.Linear, tp_mode: str):
+        """Transfer and shard weights from original Linear to HybridLinear."""
+        with torch.no_grad():
+            if tp_mode == "column":
+                # Column parallel: shard output dimension (dim=0)
+                local_out_features = hybrid_module.out_features
+                start_idx = hybrid_module.tp_rank * local_out_features
+                end_idx = start_idx + local_out_features
+                
+                # Shard weight
+                hybrid_module.weight.copy_(original_module.weight[start_idx:end_idx, :])
+                
+                # Shard bias if present
+                if hybrid_module.bias is not None and original_module.bias is not None:
+                    hybrid_module.bias.copy_(original_module.bias[start_idx:end_idx])
+                    
+            elif tp_mode == "row":
+                # Row parallel: shard input dimension (dim=1)
+                local_in_features = hybrid_module.in_features
+                start_idx = hybrid_module.tp_rank * local_in_features
+                end_idx = start_idx + local_in_features
+                
+                # Shard weight
+                hybrid_module.weight.copy_(original_module.weight[:, start_idx:end_idx])
+                
+                # Only rank 0 gets bias for row parallel
+                if hybrid_module.bias is not None and original_module.bias is not None:
+                    hybrid_module.bias.copy_(original_module.bias)
+                    
+            else:
+                # No TP: direct copy
+                hybrid_module.weight.copy_(original_module.weight)
+                if hybrid_module.bias is not None and original_module.bias is not None:
+                    hybrid_module.bias.copy_(original_module.bias)
+    
+    def _transfer_layernorm_state_dict(self, hybrid_module: HybridLayerNorm, original_module: nn.Module):
+        """Transfer weights from original LayerNorm to HybridLayerNorm."""
+        with torch.no_grad():
+            if hybrid_module.weight is not None and original_module.weight is not None:
+                hybrid_module.weight.copy_(original_module.weight)
+            if hybrid_module.bias is not None and original_module.bias is not None:
+                hybrid_module.bias.copy_(original_module.bias)
+    
+    def _transfer_embedding_state_dict(self, hybrid_module: HybridEmbedding, original_module: nn.Embedding, tp_enabled: bool):
+        """Transfer and shard weights from original Embedding to HybridEmbedding."""
+        with torch.no_grad():
+            if tp_enabled and hybrid_module.tp_size > 1:
+                # TP enabled: shard embedding dimension
+                local_embedding_dim = hybrid_module.embedding_dim
+                start_idx = hybrid_module.tp_rank * local_embedding_dim
+                end_idx = start_idx + local_embedding_dim
+                
+                # Shard embedding weight
+                hybrid_module.weight.copy_(original_module.weight[:, start_idx:end_idx])
+            else:
+                # No TP: direct copy
+                hybrid_module.weight.copy_(original_module.weight)
     
     def forward(self, *args, **kwargs):
         """Forward pass through the unified hybrid model."""
@@ -371,10 +490,8 @@ class HybridParallelWrapper(nn.Module):
 
 def apply_hybrid_parallel(model: nn.Module,
                                   parallel_context: ParallelContext,
-                                  column_linear_names: Optional[List[str]] = None,
-                                  row_linear_names: Optional[List[str]] = None,
-                                  qkv_column_names: Optional[List[str]] = None,
-                                  qkv_row_names: Optional[List[str]] = None,
+                                  column_linear_patterns: Optional[List[str]] = None,
+                                  row_linear_patterns: Optional[List[str]] = None,
                                   block_names: Optional[List[str]] = None) -> HybridParallelWrapper:
     """
     Apply unified hybrid parallelism (TP + DP + PP) to a model.
@@ -382,14 +499,14 @@ def apply_hybrid_parallel(model: nn.Module,
     Args:
         model (nn.Module): The model to apply hybrid parallelism to
         parallel_context (ParallelContext): The parallel context with TP, DP, and PP configuration
-        column_linear_names (List[str], optional): Names of modules for column parallel (TP)
-        row_linear_names (List[str], optional): Names of modules for row parallel (TP)
-        qkv_column_names (List[str], optional): Names of modules for QKV column parallel (TP)
-        qkv_row_names (List[str], optional): Names of modules for QKV row parallel (TP)
+        column_linear_patterns (List[str], optional): Path patterns for column parallel (TP)
+            Example: ["*.attn.c_attn"] matches transformer.h.0.attn.c_attn, transformer.h.1.attn.c_attn, etc.
+        row_linear_patterns (List[str], optional): Path patterns for row parallel (TP)
+            Example: ["*.attn.c_proj", "*.mlp.c_proj"] matches both attention and MLP projections
         block_names (List[str], optional): Names of block containers for pipeline parallel (PP)
         
     Returns:
-        UnifiedHybridWrapper: The wrapped model with unified hybrid parallelism applied
+        HybridParallelWrapper: The wrapped model with unified hybrid parallelism applied
         
     Example:
         >>> # Initialize distributed (8 GPUs: TP=2, DP=2, PP=2)
@@ -398,11 +515,11 @@ def apply_hybrid_parallel(model: nn.Module,
         >>> 
         >>> # Apply unified 3D hybrid parallelism
         >>> model = GPT2Model(config)
-        >>> hybrid_model = apply_unified_hybrid_parallel(
+        >>> hybrid_model = apply_hybrid_parallel(
         ...     model=model,
         ...     parallel_context=ctx,
-        ...     qkv_column_names=["c_attn"],
-        ...     qkv_row_names=["c_proj"],
+        ...     column_linear_patterns=["*.attn.c_attn"],  # QKV projection
+        ...     row_linear_patterns=["*.attn.c_proj", "*.mlp.c_proj"],  # Output projections
         ...     block_names=["transformer.h"]
         ... )
         >>> 
@@ -419,10 +536,8 @@ def apply_hybrid_parallel(model: nn.Module,
     
     if tp_size > 1:
         tp_config = {
-            "column_linear_names": column_linear_names or [],
-            "row_linear_names": row_linear_names or [],
-            "qkv_column_names": qkv_column_names or [],
-            "qkv_row_names": qkv_row_names or []
+            "column_linear_patterns": column_linear_patterns or [],
+            "row_linear_patterns": row_linear_patterns or []
         }
     
     # Prepare PP configuration
