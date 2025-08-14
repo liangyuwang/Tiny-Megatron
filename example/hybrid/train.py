@@ -67,17 +67,10 @@ optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5, weight_decay=1e-1)
 
 for i in tqdm(range(100)):
     optimizer.zero_grad()
-    
-    # Enable DP gradient sync for this iteration
-    model.require_backward_grad_sync = True
-    
-    logits, loss = model(input, target)
-    
-    # Loss is always valid for 2D parallelism (no PP)
-    if loss is not None:
-        tqdm.write(f"iter {i} loss: {loss.item():.4f}")
-        loss.backward()
-    
+    model.require_dp_backward_grad_sync = True
+    _, loss = model(input, target)
+    if rank == 0: tqdm.write(f"iter {i} loss: {loss.item():.4f}")
+    loss.backward()
     optimizer.step()
 
 dist.destroy_process_group() 
