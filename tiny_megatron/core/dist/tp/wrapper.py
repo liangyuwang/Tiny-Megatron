@@ -61,9 +61,6 @@ class TPWrapper(nn.Module):
         # Apply TP wrapping
         self._wrap_layers()
         
-        # Move entire model to target device
-        self.model = self.model.to(self.device)
-    
     def forward(self, *args, **kwargs):
         """Forward pass through the wrapped model."""
         return self.model(*args, **kwargs)
@@ -81,6 +78,8 @@ class TPWrapper(nn.Module):
                     self._replace_with_column_parallel(module, child_name, child, full_name)
                 elif child_name in self.row_linear_names:
                     self._replace_with_row_parallel(module, child_name, child, full_name)
+                elif isinstance(child, nn.Linear) or isinstance(child, nn.Embedding) or isinstance(child, nn.LayerNorm):
+                    self._replace_with_other_module(module, child_name, child)
                 else:
                     # Recursively process children
                     _replace_module_recursive(child, full_name)
@@ -112,7 +111,7 @@ class TPWrapper(nn.Module):
         # Replace the module
         setattr(parent_module, module_name, new_module)
         
-        print(f"Replaced {full_name} with ColumnParallelLinear")
+        print(f"[Rank {self.device}] Replaced {full_name} with ColumnParallelLinear")
     
     def _replace_with_row_parallel(self, parent_module, module_name, original_module, full_name):
         """Replace a module with RowParallelLinear."""
@@ -139,7 +138,7 @@ class TPWrapper(nn.Module):
         # Replace the module
         setattr(parent_module, module_name, new_module)
         
-        print(f"Replaced {full_name} with RowParallelLinear")
+        print(f"[Rank {self.device}] Replaced {full_name} with RowParallelLinear")
     
     def _load_sharded_state_dict(self, new_module, original_module, shard_dim):
         """
@@ -180,6 +179,10 @@ class TPWrapper(nn.Module):
         # Load the sharded state dict
         new_module.load_state_dict(new_state)
     
+    def _replace_with_other_module(self, parent_module, module_name, original_module):
+        # Replace the module
+        setattr(parent_module, module_name, original_module.to(self.device))
+
     def get_tp_info(self):
         """Get information about the TP configuration."""
         return {
