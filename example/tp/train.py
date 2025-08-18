@@ -10,7 +10,7 @@ import torch
 import torch.distributed as dist
 
 from example.model import GPTConfig, GPT2Model
-from tiny_megatron.core import ParallelContext, TPWrapper
+from tiny_megatron.core import ParallelContext, apply_tensor_parallel
 
 # init distributed
 rank = int(os.getenv('LOCAL_RANK', '0'))
@@ -22,11 +22,11 @@ torch.cuda.set_device(rank)
 config = GPTConfig()
 model = GPT2Model(config)   # init model on CPU
 parallel_context = ParallelContext({"tp": world_size})
-model = TPWrapper(
+model = apply_tensor_parallel(
         model, 
         parallel_context=parallel_context,
-        column_linear_names=["c_attn", "c_fc"],
-        row_linear_names=["c_proj"]
+        column_linear_names=["attn.c_attn", "mlp.c_fc"],
+        row_linear_names=["attn.c_proj", "mlp.c_proj"]
     )  # TPWrapper automatically moves parameters to rank's GPU
 
 input = torch.randint(0, config.vocab_size, (1, config.block_size)).cuda()

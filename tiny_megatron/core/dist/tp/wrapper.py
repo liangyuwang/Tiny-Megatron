@@ -6,6 +6,7 @@ import torch
 import torch.nn as nn
 import torch.distributed as dist
 from typing import List, Optional
+import fnmatch
 
 from .module import (
     ColumnParallelLinear,
@@ -74,9 +75,9 @@ class TPWrapper(nn.Module):
                 full_name = f"{path}.{child_name}" if path else child_name
                 
                 # Check if this module should be replaced
-                if child_name in self.column_linear_names:
+                if any(fnmatch.fnmatch(full_name, pattern) for pattern in self.column_linear_names):
                     self._replace_with_column_parallel(module, child_name, child, full_name)
-                elif child_name in self.row_linear_names:
+                elif any(fnmatch.fnmatch(full_name, pattern) for pattern in self.row_linear_names):
                     self._replace_with_row_parallel(module, child_name, child, full_name)
                 elif isinstance(child, nn.Linear) or isinstance(child, nn.Embedding) or isinstance(child, nn.LayerNorm):
                     self._replace_with_other_module(module, child_name, child)
