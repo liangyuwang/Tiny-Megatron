@@ -7,8 +7,7 @@
 ### Multiple Parallelism Strategies
 - **Tensor Parallelism (TP)**: Split individual layers across multiple devices
 - **Data Parallelism (DP)**: Replicate model across devices, shard data batches  
-- **Pipeline Parallelism (PP)**: Distribute model layers into sequential stages
-- **3D Hybrid Parallelism**: Combine TP + DP + PP for maximum scalability
+- **2D Hybrid Parallelism**: Combine TP + DP for effective scalability
 
 ### Core Components
 - **Custom Neural Network Modules**: Optimized implementations of Linear, Embedding, LayerNorm
@@ -29,8 +28,7 @@ Tiny-Megatron/
 │   ├── dist/                       # Distributed Parallelism
 │   │   ├── tp/                     # • Tensor Parallelism (TP)
 │   │   ├── dp/                     # • Data Parallelism (DP)
-│   │   ├── pp/                     # • Pipeline Parallelism (PP)
-│   │   ├── hybrid/                 # • 3D Hybrid Parallelism
+│   │   ├── hybrid/                 # • 2D Hybrid Parallelism (TP + DP)
 │   │   └── utils/                  # • Communication utilities
 │   ├── module/                     # Custom NN Modules
 │   │   ├── linear.py               # • Optimized Linear layers
@@ -44,19 +42,18 @@ Tiny-Megatron/
 │   ├── model.py                    # • GPT-2 model implementation
 │   ├── tp/train.py                 # • Tensor parallelism demo
 │   ├── dp/train.py                 # • Data parallelism demo  
-│   ├── pp/train.py                 # • Pipeline parallelism demo
-│   └── hybrid/train.py             # • 3D hybrid parallelism demo
+│   └── hybrid/train.py             # • 2D hybrid parallelism demo
 ```
 
 ### 🎯 Key Components
 
 | Component | Purpose | Key Files |
 |-----------|---------|-----------|
-| **Distributed Parallelism** | Core parallel strategies | `dist/{tp,dp,pp,hybrid}/` |
+| **Distributed Parallelism** | Core parallel strategies | `dist/{tp,dp,hybrid}/` |
 | **Custom Modules** | Optimized NN building blocks | `module/{linear,embedding}.py` |
 | **ParallelContext** | Multi-dimensional coordination | `dist/utils/comm.py` |
 | **Auto-tuner** | Performance optimization | `autotuner/runtime_tuner.py` |
-| **Examples** | Complete training demos | `example/{tp,dp,pp,hybrid}/` |
+| **Examples** | Complete training demos | `example/{tp,dp,hybrid}/` |
 
 ## 🛠️ Installation
 
@@ -87,16 +84,10 @@ torchrun --nproc_per_node=2 example/tp/train.py
 torchrun --nproc_per_node=2 example/dp/train.py
 ```
 
-### 3. Pipeline Parallelism (2 GPUs)
+### 3. 2D Hybrid Parallelism (4 GPUs)
 ```bash
-# Split model into sequential stages
-torchrun --nproc_per_node=2 example/pp/train.py
-```
-
-### 4. 3D Hybrid Parallelism (8 GPUs)
-```bash
-# Combine all parallelism strategies: PP=2 x TP=2 x DP=2
-torchrun --nproc_per_node=8 example/hybrid/train.py
+# Combine TP and DP: TP=2 x DP=2
+torchrun --nproc_per_node=4 example/hybrid/train.py
 ```
 
 ## 💡 Usage Examples
@@ -119,12 +110,15 @@ parallel_config = {"tp": 2}  # Use 2 GPUs for tensor parallelism
 context = ParallelContext(parallel_config)
 
 # Apply tensor parallelism
-model = TPWrapper(
-        model, 
-        parallel_context=parallel_context,
-        column_linear_names=["c_attn", "c_fc"],
-        row_linear_names=["c_proj"]
-    )  # TPWrapper automatically moves parameters to rank's GPU
+tp_config = {
+    "column_linear_patterns": ["attn.c_attn", "mlp.c_fc"],
+    "row_linear_patterns": ["attn.c_proj", "mlp.c_proj"]
+}
+model = apply_tensor_parallel(
+    model=model, 
+    parallel_context=context,
+    tp_config=tp_config
+)
 
 # Train normally
 optimizer = torch.optim.AdamW(model.parameters())
@@ -134,29 +128,27 @@ for batch in dataloader:
     optimizer.step()
 ```
 
-### 3D Hybrid Parallelism
+### 2D Hybrid Parallelism
 ```python
 from tiny_megatron.core import ParallelContext, apply_hybrid_parallel
 
-# Configure 3D parallelism for 8 GPUs
+# Configure 2D parallelism for 4 GPUs
 parallel_config = {
-    "pp": 2,  # 2 pipeline stages
     "tp": 2,  # 2-way tensor parallelism  
     "dp": 2   # 2-way data parallelism
 }
 
 context = ParallelContext(parallel_config)
 
-# Apply 3D hybrid parallelism
-column_linear_names = ["c_attn", "c_fc"] if parallel_config.get("tp", 1) > 1 else None
-row_linear_names = ["c_proj"] if parallel_config.get("tp", 1) > 1 else None
-block_names = ["transformer.h"] if parallel_config.get("pp", 1) > 1 else None
+# Apply 2D hybrid parallelism
+tp_config = {
+    "column_linear_patterns": ["attn.c_attn", "mlp.c_fc"],
+    "row_linear_patterns": ["attn.c_proj", "mlp.c_proj"]
+}
 model = apply_hybrid_parallel(
     model=model,
-    parallel_context=parallel_context,
-    column_linear_names=column_linear_names,
-    row_linear_names=row_linear_names,
-    block_names=block_names,
+    parallel_context=context,
+    tp_config=tp_config
 )
 ```
 
@@ -174,15 +166,10 @@ model = apply_hybrid_parallel(
 - **Data Sharding**: Different data batches per device
 - **Gradient Synchronization**: All-reduce after backward pass
 
-#### Pipeline Parallelism (PP)
-- **Layer Distribution**: Different model layers on different devices
-- **Sequential Execution**: Forward/backward through pipeline stages
-- **Point-to-Point Communication**: Send/recv activations between stages
-
-#### 3D Hybrid Parallelism
-- **Nested Structure**: PP (outer) → TP (middle) → DP (inner)
-- **Flexible Configuration**: Support arbitrary combinations
-- **Optimal Scaling**: Maximize hardware utilization
+#### 2D Hybrid Parallelism
+- **Combined Strategy**: Tensor Parallelism (TP) + Data Parallelism (DP)
+- **Flexible Configuration**: Support various TP and DP combinations
+- **Efficient Scaling**: Optimal resource utilization for medium-scale training
 
 ### Key Components
 
@@ -191,8 +178,7 @@ Central coordination for multi-dimensional parallelism:
 ```python
 context = ParallelContext({
     "tp": tensor_parallel_size,
-    "dp": data_parallel_size,  
-    "pp": pipeline_parallel_size
+    "dp": data_parallel_size
 })
 ```
 
@@ -217,7 +203,7 @@ tuner = RuntimeAutoTuner(
 ```bash
 export MASTER_ADDR=localhost
 export MASTER_PORT=29500
-export WORLD_SIZE=8
+export WORLD_SIZE=4
 export LOCAL_RANK=0
 ```
 
@@ -225,8 +211,7 @@ export LOCAL_RANK=0
 ```python
 parallel_config = {
     "tp": 2,    # Tensor parallel size
-    "dp": 2,    # Data parallel size  
-    "pp": 2,    # Pipeline parallel size
+    "dp": 2,    # Data parallel size
 }
 ```
 
@@ -236,8 +221,25 @@ Each parallelism strategy includes complete training examples:
 
 - **`example/tp/train.py`**: Tensor parallelism with GPT-2
 - **`example/dp/train.py`**: Data parallelism training
-- **`example/pp/train.py`**: Pipeline parallelism implementation  
-- **`example/hybrid/train.py`**: 3D hybrid parallelism demo
+- **`example/hybrid/train.py`**: 2D hybrid parallelism demo
+
+## 🛣️ Roadmap
+
+### Currently Supported
+- ✅ **Tensor Parallelism (TP)**: Column and row parallelism for linear layers
+- ✅ **Data Parallelism (DP)**: Standard gradient synchronization
+- ✅ **2D Hybrid Parallelism**: TP + DP combinations
+
+### Future Plans
+To maintain code simplicity and readability, we are currently focusing on TP and DP implementations. Future releases will include:
+
+- 🔄 **Pipeline Parallelism (PP)**: Layer-wise model partitioning
+- 🔄 **ZeRO Optimizer States**: Memory-efficient optimizer state sharding
+- 🔄 **Expert Parallelism (EP)**: Mixture-of-experts model scaling
+- 🔄 **Sequence Parallelism (SP)**: Sequence dimension parallelism for long contexts
+- 🔄 **3D Hybrid Parallelism**: TP + DP + PP combinations
+
+These advanced strategies will be added incrementally while maintaining the educational and minimalistic nature of the codebase.
 
 ## 📄 License
 
