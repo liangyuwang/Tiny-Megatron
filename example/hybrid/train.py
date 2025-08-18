@@ -38,7 +38,8 @@ if world_size == 8:
 elif world_size == 4:
     parallel_config = {"tp": 2, "dp": 2}  # 2D: 2x2
 elif world_size == 2:
-    parallel_config = {"tp": 2, "dp": 1}  # 1D: 2 (TP only)
+    # parallel_config = {"tp": 2, "dp": 1}  # 1D: 2 (TP only)
+    parallel_config = {"tp": 1, "dp": 2}  # 1D: 2 (DP only)
 else:
     raise ValueError(f"Unsupported world_size: {world_size}. Supported: 2, 4, 8")
 
@@ -60,8 +61,10 @@ model = apply_hybrid_parallel(
 
 input = torch.randint(0, config.vocab_size, (1, config.block_size)).cuda()
 target = torch.randint(0, config.vocab_size, (1, config.block_size)).cuda()
-# sync data to simulate tensor parallel
-dist.all_reduce(input, group=parallel_context.get_group("tp")); dist.all_reduce(target, group=parallel_context.get_group("tp"))
+# sync data to simulate tensor parallel (only when TP size > 1)
+if parallel_context.parallel_dims.get("tp", 1) > 1:
+    dist.all_reduce(input, group=parallel_context.get_group("tp"))
+    dist.all_reduce(target, group=parallel_context.get_group("tp"))
 
 optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5, weight_decay=1e-1)
 

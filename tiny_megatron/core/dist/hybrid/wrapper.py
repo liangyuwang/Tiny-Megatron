@@ -7,6 +7,7 @@ import copy
 from typing import Optional, Dict, List, Any
 from ..utils.comm import ParallelContext
 from .modules import HybridLinear, HybridLayerNorm, HybridEmbedding
+from ..utils.wrapper import get_init_args
 
 
 class HybridParallelWrapper(nn.Module):
@@ -70,9 +71,6 @@ class HybridParallelWrapper(nn.Module):
         # Create hybrid model
         self.model = self._create_hybrid_model(model)
         
-        # Move model to target device
-        self.model = self.model.to(self.device)
-        
         # Initialize DP state for gradient synchronization
         self.require_dp_backward_grad_sync = False
         
@@ -120,11 +118,13 @@ class HybridParallelWrapper(nn.Module):
             # Check if this is a Linear module
             if isinstance(child_module, nn.Linear):
                 tp_mode = self._classify_tp_mode(full_path, column_linear_patterns, row_linear_patterns)
-                
+                # Always replace Linear modules to ensure consistent device placement
+                new_module = self._create_hybrid_linear(child_module, tp_mode)
+                setattr(module, name, new_module)
                 if tp_mode != "none":
-                    new_module = self._create_hybrid_linear(child_module, tp_mode)
-                    setattr(module, name, new_module)
                     print(f"Replaced {full_path} with HybridLinear (tp_mode={tp_mode})")
+                else:
+                    print(f"Replaced {full_path} with HybridLinear (tp_mode=none)")
             
             # Check if this is a LayerNorm module
             elif isinstance(child_module, nn.LayerNorm):
@@ -135,11 +135,9 @@ class HybridParallelWrapper(nn.Module):
             
             # Check if this is an Embedding module  
             elif isinstance(child_module, nn.Embedding):
-                tp_enabled = self._should_enable_tp_for_embedding(full_path)
-                if tp_enabled:
-                    new_module = self._create_hybrid_embedding(child_module, tp_enabled)
-                    setattr(module, name, new_module)
-                    print(f"Replaced {full_path} with HybridEmbedding (tp_enabled={tp_enabled})")
+                new_module = self._create_hybrid_embedding(child_module)
+                setattr(module, name, new_module)
+                print(f"Replaced {full_path} with HybridEmbedding")
             
             # Recursively process child modules
             self._replace_modules_recursive(
@@ -147,6 +145,10 @@ class HybridParallelWrapper(nn.Module):
 
     def _classify_tp_mode(self, module_path: str, column_patterns: List[str], row_patterns: List[str]) -> str:
         """Classify TP mode for a Linear module based on path patterns."""
+        # If TP size is 1, all modules should be in "none" mode
+        if self.tp_size <= 1:
+            return "none"
+            
         for pattern in column_patterns:
             if pattern in module_path:
                 return "column"
@@ -157,55 +159,32 @@ class HybridParallelWrapper(nn.Module):
         
         return "none"
 
-    def _should_enable_tp_for_embedding(self, module_path: str) -> bool:
-        """Check if TP should be enabled for an embedding module."""
-        return self.tp_size > 1 and ("wte" in module_path or "embedding" in module_path.lower())
-
     def _create_hybrid_linear(self, original_module: nn.Linear, tp_mode: str) -> HybridLinear:
         """Create a HybridLinear module from original Linear module."""
-        # Get original device and dtype
-        device = original_module.weight.device
-        dtype = original_module.weight.dtype
+        # Get initialization arguments  
+        init_args = get_init_args(original_module)
         
         # Create hybrid module with correct parameters
         hybrid_module = HybridLinear(
-            in_features=original_module.in_features,
-            out_features=original_module.out_features,
-            bias=original_module.bias is not None,
-            device=device,
-            dtype=dtype,
+            **init_args,
             auto_tune=False,  # Can be made configurable
             parallel_context=self.parallel_context,
-            tp_mode=tp_mode,
-            dp_enabled=self.dp_size > 1
+            tp_mode=tp_mode
         )
         
         # Transfer state dict with proper weight sharding for TP
         self._transfer_linear_state_dict(hybrid_module, original_module, tp_mode)
         
-        return hybrid_module
+        return hybrid_module.to(self.device)
 
     def _create_hybrid_layernorm(self, original_module: nn.Module) -> HybridLayerNorm:
         """Create a HybridLayerNorm module from original LayerNorm module."""
-        # Handle both standard nn.LayerNorm and custom LayerNorm
-        if hasattr(original_module, 'normalized_shape'):
-            normalized_shape = original_module.normalized_shape
-        else:
-            # For custom LayerNorm, infer from weight shape
-            normalized_shape = original_module.weight.shape if original_module.weight is not None else (768,)
-        
-        # Get original device and dtype
-        device = original_module.weight.device if original_module.weight is not None else None
-        dtype = original_module.weight.dtype if original_module.weight is not None else None
+        # Get initialization arguments  
+        init_args = get_init_args(original_module)
         
         # Create hybrid module
         hybrid_module = HybridLayerNorm(
-            normalized_shape=normalized_shape,
-            eps=getattr(original_module, 'eps', 1e-5),
-            elementwise_affine=original_module.weight is not None,
-            bias=original_module.bias is not None,
-            device=device,
-            dtype=dtype,
+            **init_args,
             auto_tune=False,  # Can be made configurable
             parallel_context=self.parallel_context
         )
@@ -213,36 +192,24 @@ class HybridParallelWrapper(nn.Module):
         # Transfer state dict
         self._transfer_layernorm_state_dict(hybrid_module, original_module)
         
-        return hybrid_module
+        return hybrid_module.to(self.device)
 
-    def _create_hybrid_embedding(self, original_module: nn.Embedding, tp_enabled: bool) -> HybridEmbedding:
+    def _create_hybrid_embedding(self, original_module: nn.Embedding) -> HybridEmbedding:
         """Create a HybridEmbedding module from original Embedding module."""
-        # Get original device and dtype
-        device = original_module.weight.device
-        dtype = original_module.weight.dtype
+        # Get initialization arguments  
+        init_args = get_init_args(original_module)
         
         # Create hybrid module
         hybrid_module = HybridEmbedding(
-            num_embeddings=original_module.num_embeddings,
-            embedding_dim=original_module.embedding_dim,
-            padding_idx=original_module.padding_idx,
-            max_norm=getattr(original_module, 'max_norm', None),
-            norm_type=getattr(original_module, 'norm_type', 2.0),
-            scale_grad_by_freq=getattr(original_module, 'scale_grad_by_freq', False),
-            sparse=getattr(original_module, 'sparse', False),
-            _weight=None,
-            _freeze=False,
-            device=device,
-            dtype=dtype,
+            **init_args,
             auto_tune=False,  # Can be made configurable
             parallel_context=self.parallel_context,
-            tp_enabled=tp_enabled
         )
         
-        # Transfer state dict with proper weight sharding for TP
-        self._transfer_embedding_state_dict(hybrid_module, original_module, tp_enabled)
+        # Transfer state dict
+        self._transfer_embedding_state_dict(hybrid_module, original_module)
         
-        return hybrid_module
+        return hybrid_module.to(self.device)
     
     def _transfer_linear_state_dict(self, hybrid_module: HybridLinear, original_module: nn.Linear, tp_mode: str):
         """Transfer and shard weights from original Linear to HybridLinear."""
@@ -287,20 +254,10 @@ class HybridParallelWrapper(nn.Module):
             if hybrid_module.bias is not None and original_module.bias is not None:
                 hybrid_module.bias.copy_(original_module.bias)
     
-    def _transfer_embedding_state_dict(self, hybrid_module: HybridEmbedding, original_module: nn.Embedding, tp_enabled: bool):
+    def _transfer_embedding_state_dict(self, hybrid_module: HybridEmbedding, original_module: nn.Embedding):
         """Transfer and shard weights from original Embedding to HybridEmbedding."""
         with torch.no_grad():
-            if tp_enabled and hybrid_module.tp_size > 1:
-                # TP enabled: shard embedding dimension
-                local_embedding_dim = hybrid_module.embedding_dim
-                start_idx = hybrid_module.tp_rank * local_embedding_dim
-                end_idx = start_idx + local_embedding_dim
-                
-                # Shard embedding weight
-                hybrid_module.weight.copy_(original_module.weight[:, start_idx:end_idx])
-            else:
-                # No TP: direct copy
-                hybrid_module.weight.copy_(original_module.weight)
+            hybrid_module.weight.copy_(original_module.weight)
 
     def forward(self, *args, **kwargs):
         if self.require_dp_backward_grad_sync:

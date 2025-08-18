@@ -28,7 +28,7 @@ class HybridLinear(Linear):
                  auto_tune: bool = False,
                  parallel_context: Optional[ParallelContext] = None,
                  tp_mode: str = "none",  # "none", "column", "row"
-                 dp_enabled: bool = False):
+                 ):
         """
         Initialize Hybrid Linear layer.
         
@@ -45,7 +45,6 @@ class HybridLinear(Linear):
         """
         self.parallel_context = parallel_context
         self.tp_mode = tp_mode
-        self.dp_enabled = dp_enabled
         
         # Get parallel sizes and ranks
         if parallel_context:
@@ -124,45 +123,81 @@ class HybridLinear(Linear):
         input, weight, bias = ctx.saved_tensors
         
         # Compute gradients
-        if ctx.needs_input_grad[0]:
-            grad_input = linear.linear_input_grad(grad_output, input, weight, runtime_tuner)
-        else:
-            grad_input = None
+        if self.tp_mode == "column" and self.tp_size > 1:
+            if ctx.needs_input_grad[0]:
+                grad_input = linear.linear_input_grad(grad_output, input, weight, runtime_tuner)
+            else:
+                grad_input = None
 
-        # Handle tensor parallelism communication in backward pass
-        if self.tp_mode == "column" and self.tp_size > 1 and grad_input is not None:
-            # Column parallel: all_reduce grad_input across TP ranks
-            tp_group = self.parallel_context.get_group("tp")
-            tp_handle = dist.all_reduce(grad_input, group=tp_group, async_op=True)
-        else:
-            tp_handle = None
+            # Handle tensor parallelism communication in backward pass
+            if grad_input is not None:
+                # Column parallel: all_reduce grad_input across TP ranks
+                tp_group = self.parallel_context.get_group("tp")
+                tp_handle = dist.all_reduce(grad_input, group=tp_group, async_op=True)
+            else:
+                tp_handle = None
 
-        if ctx.needs_input_grad[1]:
-            grad_weight = linear.linear_weight_grad(grad_output, input, weight, runtime_tuner)
-        else:
-            grad_weight = None
+            if ctx.needs_input_grad[1]:
+                grad_weight = linear.linear_weight_grad(grad_output, input, weight, runtime_tuner)
+            else:
+                grad_weight = None
 
-        if bias is not None and ctx.needs_input_grad[2]:
-            grad_bias = linear.linear_bias_grad(grad_output, input, weight, runtime_tuner)
-        else:
-            grad_bias = None
-        
-        # Wait for tensor parallelism communication to complete
-        if tp_handle is not None:
-            tp_handle.wait()
+            if bias is not None and ctx.needs_input_grad[2]:
+                grad_bias = linear.linear_bias_grad(grad_output, input, weight, runtime_tuner)
+            else:
+                grad_bias = None
+            
+            # Wait for tensor parallelism communication to complete
+            if tp_handle is not None:
+                tp_handle.wait()
 
-        # Handle data parallelism gradient synchronization
-        if self.dp_enabled and self.dp_size > 1:
-            dp_group = self.parallel_context.get_group("dp")
-            if grad_weight is not None and self.weight.dp_bwd_sync:
-                dist.all_reduce(grad_weight, group=dp_group)
-                grad_weight = grad_weight / self.dp_size
+            # Handle data parallelism gradient synchronization
+            if self.dp_size > 1:
+                dp_group = self.parallel_context.get_group("dp")
+                if grad_weight is not None and self.weight.dp_bwd_sync:
+                    dist.all_reduce(grad_weight, group=dp_group)
+                    grad_weight = grad_weight / self.dp_size
+                    self.weight.dp_bwd_sync = False
+                if grad_bias is not None and self.bias.dp_bwd_sync:
+                    dist.all_reduce(grad_bias, group=dp_group)
+                    grad_bias = grad_bias / self.dp_size
+                    self.bias.dp_bwd_sync = False
+        else:
+            if ctx.needs_input_grad[1]:
+                grad_weight = linear.linear_weight_grad(grad_output, input, weight, runtime_tuner)
+            else:
+                grad_weight = None
+
+            if bias is not None and ctx.needs_input_grad[2]:
+                grad_bias = linear.linear_bias_grad(grad_output, input, weight, runtime_tuner)
+            else:
+                grad_bias = None
+            
+            # Handle data parallelism gradient synchronization
+            dp_grad_weight_handle = None
+            dp_grad_bias_handle = None
+            if self.dp_size > 1:
+                dp_group = self.parallel_context.get_group("dp")
+                if grad_weight is not None and self.weight.dp_bwd_sync:
+                    dp_grad_weight_handle = dist.all_reduce(grad_weight, group=dp_group, async_op=True)
+                if grad_bias is not None and self.bias.dp_bwd_sync:
+                    dp_grad_bias_handle = dist.all_reduce(grad_bias, group=dp_group, async_op=True)
+            
+            if ctx.needs_input_grad[0]:
+                grad_input = linear.linear_input_grad(grad_output, input, weight, runtime_tuner)
+            else:
+                grad_input = None
+
+            # Wait for data parallelism communication to complete
+            if dp_grad_weight_handle is not None:
+                dp_grad_weight_handle.wait()
+                grad_weight.div_(self.dp_size)
                 self.weight.dp_bwd_sync = False
-            if grad_bias is not None and self.bias.dp_bwd_sync:
-                dist.all_reduce(grad_bias, group=dp_group)
-                grad_bias = grad_bias / self.dp_size
+            if dp_grad_bias_handle is not None:
+                dp_grad_bias_handle.wait()
+                grad_bias.div_(self.dp_size)
                 self.bias.dp_bwd_sync = False
-        
+
         # Validate gradient shapes
         if grad_input is not None and grad_input.shape != input.shape:
             raise RuntimeError(f"grad_input shape {grad_input.shape} is not equal to input shape {input.shape}")
@@ -204,6 +239,16 @@ class HybridLayerNorm(LayerNorm):
         """
         self.parallel_context = parallel_context
         
+        # Get parallel sizes and ranks
+        if parallel_context:
+            self.tp_size = parallel_context.parallel_dims.get("tp", 1)
+            self.dp_size = parallel_context.parallel_dims.get("dp", 1)
+            self.tp_rank = parallel_context.get_rank_in("tp") if self.tp_size > 1 else 0
+            self.dp_rank = parallel_context.get_rank_in("dp") if self.dp_size > 1 else 0
+        else:
+            self.tp_size = self.dp_size = 1
+            self.tp_rank = self.dp_rank = 0
+        
         # Initialize base LayerNorm
         super().__init__(normalized_shape, eps, elementwise_affine, bias, device, dtype, auto_tune)
         
@@ -228,12 +273,14 @@ class HybridLayerNorm(LayerNorm):
         }
         dx, dw_, db_, args = layernorm.layernorm_dx(grad_output, input, weight, bias, mean, rstd, args, runtime_tuner)
         dw, db = layernorm.layernorm_dwdb(weight, bias, dw_, db_, args, runtime_tuner)
-        if self.weight.dp_bwd_sync:    # core step of ddp
-            dist.all_reduce(dw, async_op=False)
-            self.weight.dp_bwd_sync = False
-        if self.bias.dp_bwd_sync:  # core step of ddp
-            dist.all_reduce(db, async_op=False)
-            self.bias.bwd_sync = False
+
+        if self.dp_size > 1:
+            if self.weight.dp_bwd_sync:    # core step of ddp
+                dist.all_reduce(dw, async_op=False, group=self.parallel_context.get_group("dp"))
+                self.weight.dp_bwd_sync = False
+            if self.bias.dp_bwd_sync:  # core step of ddp
+                dist.all_reduce(db, async_op=False, group=self.parallel_context.get_group("dp"))
+                self.bias.dp_bwd_sync = False
         
         # Check if the grad shape is correct
         if dx is not None and dx.shape != input.shape:
@@ -264,8 +311,7 @@ class HybridEmbedding(Embedding):
                  device=None,
                  dtype=None,
                  auto_tune: bool = False,
-                 parallel_context: Optional[ParallelContext] = None,
-                 tp_enabled: bool = False):
+                 parallel_context: Optional[ParallelContext] = None):
         """
         Initialize Hybrid Embedding.
         
@@ -286,28 +332,19 @@ class HybridEmbedding(Embedding):
             tp_enabled: Whether tensor parallelism is enabled
         """
         self.parallel_context = parallel_context
-        self.tp_enabled = tp_enabled
         
-        # Get parallel configuration
+        # Get parallel sizes and ranks
         if parallel_context:
             self.tp_size = parallel_context.parallel_dims.get("tp", 1)
+            self.dp_size = parallel_context.parallel_dims.get("dp", 1)
             self.tp_rank = parallel_context.get_rank_in("tp") if self.tp_size > 1 else 0
+            self.dp_rank = parallel_context.get_rank_in("dp") if self.dp_size > 1 else 0
         else:
-            self.tp_size = 1
-            self.tp_rank = 0
-        
-        # Store original embedding dimension
-        self.original_embedding_dim = embedding_dim
-        
-        # Calculate embedding dimensions for TP
-        if self.tp_enabled and self.tp_size > 1:
-            # Shard embedding dimension across TP ranks
-            local_embedding_dim = embedding_dim // self.tp_size
-        else:
-            local_embedding_dim = embedding_dim
+            self.tp_size = self.dp_size = 1
+            self.tp_rank = self.dp_rank = 0
         
         # Initialize base Embedding with potentially modified dimensions
-        super().__init__(num_embeddings, local_embedding_dim, padding_idx, max_norm, norm_type,
+        super().__init__(num_embeddings, embedding_dim, padding_idx, max_norm, norm_type,
                          scale_grad_by_freq, sparse, _weight, _freeze, device, dtype, auto_tune)
         
     def _init_parameters(self):
@@ -321,43 +358,17 @@ class HybridEmbedding(Embedding):
             self.weight = Parameter(self._weight, requires_grad=not self._freeze)
 
     
-    def forward_callback(self, ctx, input, weight, padding_idx, max_norm, norm_type, runtime_tuner):
-        """
-        Override forward callback to insert hybrid parallelism communication.
-        """
-        ctx.save_for_backward(input, weight)
-        
-        # Perform embedding lookup
-        output = embedding.embedding_forward(input, weight, padding_idx, max_norm, norm_type, runtime_tuner)
-        
-        # Handle tensor parallelism - all_gather to reconstruct full embedding
-        if self.tp_enabled and self.tp_size > 1:
-            tp_group = self.parallel_context.get_group("tp")
-            output_list = [torch.empty_like(output) for _ in range(self.tp_size)]
-            dist.all_gather(output_list, output, group=tp_group)
-            output = torch.cat(output_list, dim=-1)
-        
-        return ctx, output
-    
     def backward_callback(self, ctx, grad_output, padding_idx, max_norm, norm_type, runtime_tuner):
         """
         Override backward callback to insert hybrid parallelism communication.
         """
         input, weight = ctx.saved_tensors
         
-        # Handle tensor parallelism gradient slicing
-        if self.tp_enabled and self.tp_size > 1:
-            # Slice grad_output to get local portion
-            local_embedding_dim = self.original_embedding_dim // self.tp_size
-            start_idx = self.tp_rank * local_embedding_dim
-            end_idx = start_idx + local_embedding_dim
-            grad_output = grad_output[..., start_idx:end_idx]
-        
         # Compute weight gradient
         if ctx.needs_input_grad[1]:
             grad_weight = embedding.embedding_weight_grad(grad_output, input, weight, runtime_tuner)
-            if self.weight.dp_bwd_sync:    # core step of ddp
-                dist.all_reduce(grad_weight, async_op=False)
+            if self.dp_size > 1 and self.weight.dp_bwd_sync:    # core step of ddp
+                dist.all_reduce(grad_weight, async_op=False, group=self.parallel_context.get_group("dp"))
                 self.weight.dp_bwd_sync = False
         else:
             grad_weight = None
