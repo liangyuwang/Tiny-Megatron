@@ -49,8 +49,8 @@ parallel_context = ParallelContext(parallel_config)
 
 # Apply 2D hybrid parallelism
 tp_config = {
-    "column_linear_patterns": ["attn.c_attn", "mlp.c_fc"],  # QKV and FC projections
-    "row_linear_patterns": ["attn.c_proj", "mlp.c_proj"]   # Output projections
+    "column_linear_names": ["attn.c_attn", "mlp.c_fc"],  # QKV and FC projections
+    "row_linear_names": ["attn.c_proj", "mlp.c_proj"]   # Output projections
 }
 
 model = apply_hybrid_parallel(

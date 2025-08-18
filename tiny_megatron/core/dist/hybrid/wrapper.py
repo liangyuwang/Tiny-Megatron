@@ -89,8 +89,8 @@ class HybridParallelWrapper(nn.Module):
         model_copy = copy.deepcopy(model)
         
         # Get TP patterns for module classification
-        column_linear_patterns = self.tp_config.get("column_linear_patterns", [])
-        row_linear_patterns = self.tp_config.get("row_linear_patterns", [])
+        column_linear_patterns = self.tp_config.get("column_linear_names", [])
+        row_linear_patterns = self.tp_config.get("row_linear_names", [])
         
         # Replace modules with hybrid versions
         self._replace_modules_recursive(
