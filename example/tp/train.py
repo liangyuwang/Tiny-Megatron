@@ -32,7 +32,11 @@ model = apply_tensor_parallel(
 input = torch.randint(0, config.vocab_size, (1, config.block_size)).cuda()
 target = torch.randint(0, config.vocab_size, (1, config.block_size)).cuda()
 # sync data to simulate tensor parallel
-dist.all_reduce(input, group=parallel_context.get_group("tp")); dist.all_reduce(target, group=parallel_context.get_group("tp"))
+tp_group = parallel_context.get_group("tp")
+tp_ranks = parallel_context.get_ranks("tp")
+dist.broadcast(input, src=tp_ranks[0], group=tp_group)
+dist.broadcast(target, src=tp_ranks[0], group=tp_group)
+
 optimizer = torch.optim.AdamW(model.parameters(), lr=1e-5, weight_decay=1e-1)
 
 for i in tqdm(range(100)):

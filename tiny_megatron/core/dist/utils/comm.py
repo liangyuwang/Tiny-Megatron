@@ -96,10 +96,36 @@ class ParallelContext:
         return groups
 
     def get_group(self, name: str):
+        if name not in self.dim_names:
+            raise ValueError(f"Unknown group name {name}. Supported: {self.dim_names}")
         return self.axis_groups[name]
 
+    def get_ranks(self, name: str) -> list[int]:
+        if name not in self.dim_names:
+            raise ValueError(f"Unknown group name {name}. Supported: {self.dim_names}")
+        dim_idx = self.dim_names.index(name)
+        target_coord = self.coords[dim_idx]
+        local_ranks = []
+        for r in range(self.world_size):
+            rank_coords = self._compute_coords(r, self.dim_sizes)
+            if rank_coords[dim_idx] == target_coord:
+                local_ranks.append(r)
+        return local_ranks
+
     def get_rank_in(self, name: str):
+        if name not in self.dim_names:
+            raise ValueError(f"Unknown group name {name}. Supported: {self.dim_names}")
         return self.coords[self.dim_names.index(name)]
+
+    def get_world_size_in(self, name: str) -> int:
+        if name not in self.dim_names:
+            raise ValueError(f"Unknown group name {name}. Supported: {self.dim_names}")
+        return len(self.get_local_ranks(name))
+    
+    def get_global_rank(self, name: str) -> int:
+        if name not in self.dim_names:
+            raise ValueError(f"Unknown group name {name}. Supported: {self.dim_names}")
+        return dist.get_rank(self.get_group(name))
 
     def get_coord_dict(self):
         return dict(zip(self.dim_names, self.coords))
