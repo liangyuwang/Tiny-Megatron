@@ -64,26 +64,6 @@ class CausalSelfAttention(nn.Module):
         self.n_head = config.n_head
         self.n_embd = config.n_embd
 
-    # def forward(self, x):
-    #     B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
-    #     # calculate query, key, values for all heads in batch and move head forward to be the batch dim
-    #     # nh is "number of heads", hs is "head size", and C (number of channels) = nh * hs
-    #     # e.g. in GPT-2 (124M), n_head=12, hs=64, so nh*hs=C=768 channels in the Transformer
-    #     qkv = self.c_attn(x)
-    #     q, k, v = qkv.chunk(3, dim=-1)
-    #     k = k.view(B, T, self.n_head, C // self.n_head) # (B, T, nh, hs)
-    #     q = q.view(B, T, self.n_head, C // self.n_head) # (B, T, nh, hs)
-    #     v = v.view(B, T, self.n_head, C // self.n_head) # (B, T, nh, hs)
-    #     # Attention implementation
-    #     if self.attention == "standard_attention":
-    #         y = standard_attention(q, k, v, dropout=self.training, dropout_p=False)
-    #     elif self.attention == "flash_attention":
-    #         y = flash_attention(q, k, v, dropout=self.training, dropout_p=False)
-    #     y = y.view(B, T, C)
-    #     # output projection
-    #     y = self.c_proj(y)
-    #     return y
-
     def forward(self, x):
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
