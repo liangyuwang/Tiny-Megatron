@@ -111,8 +111,8 @@ context = ParallelContext(parallel_config)
 
 # Apply tensor parallelism
 tp_config = {
-    "column_linear_patterns": ["attn.c_attn", "mlp.c_fc"],
-    "row_linear_patterns": ["attn.c_proj", "mlp.c_proj"]
+    "column_linear_names": ["attn.c_attn", "mlp.c_fc"],
+    "row_linear_names": ["attn.c_proj", "mlp.c_proj"]
 }
 model = apply_tensor_parallel(
     model=model, 
@@ -142,8 +142,8 @@ context = ParallelContext(parallel_config)
 
 # Apply 2D hybrid parallelism
 tp_config = {
-    "column_linear_patterns": ["attn.c_attn", "mlp.c_fc"],
-    "row_linear_patterns": ["attn.c_proj", "mlp.c_proj"]
+    "column_linear_names": ["attn.c_attn", "mlp.c_fc"],
+    "row_linear_names": ["attn.c_proj", "mlp.c_proj"]
 }
 model = apply_hybrid_parallel(
     model=model,
