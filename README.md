@@ -237,7 +237,7 @@ To maintain code simplicity and readability, we are currently focusing on TP and
 - 🔄 **ZeRO Optimizer States**: Memory-efficient optimizer state sharding
 - 🔄 **Expert Parallelism (EP)**: Mixture-of-experts model scaling
 - 🔄 **Sequence Parallelism (SP)**: Sequence dimension parallelism for long contexts
-- 🔄 **3D Hybrid Parallelism**: TP + DP + PP combinations
+- 🔄 **5D Hybrid Parallelism**: TP + EP + SP + DP (ZeRO) + PP combinations
 
 These advanced strategies will be added incrementally while maintaining the educational and minimalistic nature of the codebase.
 
