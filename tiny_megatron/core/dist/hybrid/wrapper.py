@@ -85,18 +85,15 @@ class HybridParallelWrapper(nn.Module):
         This method walks through the model and replaces Linear, LayerNorm, and Embedding 
         modules with their hybrid equivalents that can handle TP and DP.
         """
-        # Create a deep copy of the model
-        model_copy = copy.deepcopy(model)
-        
         # Get TP patterns for module classification
         column_linear_patterns = self.tp_config.get("column_linear_names", [])
         row_linear_patterns = self.tp_config.get("row_linear_names", [])
         
         # Replace modules with hybrid versions
         self._replace_modules_recursive(
-            model_copy, "", column_linear_patterns, row_linear_patterns)
+            model, "", column_linear_patterns, row_linear_patterns)
         
-        return model_copy
+        return model
 
     def _replace_modules_recursive(self, 
                                  module: nn.Module, 
